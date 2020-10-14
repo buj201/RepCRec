@@ -1,6 +1,6 @@
 import re
 
-from src.Transaction import Transaction,ReadOnlyTransaction
+from src.Transaction import ReadWriteTransaction,ReadOnlyTransaction
 
 class Parser(object):
 
@@ -31,7 +31,7 @@ class Parser(object):
             Add transaction to self.transactions
         """
         T = m.group(1)
-        self.transactions[T] = Transaction(T,self.time)
+        self.transactions[T] = ReadWriteTransaction(T,self.time)
         
     def p_BEGIN_RO(self,m):
         """
@@ -88,20 +88,24 @@ class Parser(object):
     def p_END(self,m):
         T = self.transactions[m.group(1)]
         
-        
-        # Scrub T from the lock tables
-        for site_number,site in self.sites.items():
-            site.scrub_transaction_from_table(T)
+        if T.read_only == True:
+            # Then committing is trivial
+            print(f"{T.name} commits")
             
-        # TODO -- commit...
+        else:
+            # Then we need to check if T can commit
+            if T.can_commit():
+                self.commit(T)
+            else:
+                self.abort(T,'failure')
         
     def p_FAIL(self,m):
-        S = m.group(1)
-        return f'Site {S} failing'
+        S = self.sites[int(m.group(1))]
+        S.fail()
         
     def p_RECOVER(self,m):
-        S = m.group(1)
-        return f'Site {S} recovering'
+        S = self.sites[int(m.group(1))]
+        S.recover(self.time)
         
     def p_line(self,line):
         """

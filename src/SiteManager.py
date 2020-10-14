@@ -13,7 +13,6 @@ class SiteManager(LockTable):
         
         # Set up site clock and status
         self.site_number = site_number
-        self.time = start_time
         self.uptime = start_time
         self.alive = True
         
@@ -38,7 +37,10 @@ class SiteManager(LockTable):
         
     def read_from_disk(self,T,x):
         """
-        Transaction T reads x from disk.
+        Transaction T reads x from disk, by reading the most recent
+        snapshot committed before T began. Note our implementation
+        allows commits where a variable is not available -- so we need
+        to ensure we return a snapshot where x is available
         
         Args:
             T: Transaction
@@ -53,9 +55,9 @@ class SiteManager(LockTable):
         
         # Get most recent snapshot on disk by traversing in reversed
         # order, breaking out when we first find a commit from before the
-        # transaction T started.
+        # transaction T started where x is available
         for snapshot in reversed(self.disk):
-            if (T.start_time > snapshot.time):
+            if ((T.start_time > snapshot.time) and (snapshot.snapshot[x].available)):
                 return snapshot.time, snapshot.snapshot[x].read()
         
     def read_from_memory(self,x):
@@ -87,16 +89,16 @@ class SiteManager(LockTable):
             None
             
         Side effects:
-            - See variable.write
+            None
         """
         self.memory[x].write(v)
         
     def fail(self):
         """
         Simulate site failing. Results in:
-            1. Lock table being erased and waits_for graph being reset
-               to the empty graph.
-            2. Site being set to down
+            - Lock table being erased and waits_for graph being reset
+              to the empty graph.
+            - Site being set to down (i.e. alive=False)
             
         Args:
             None
@@ -105,23 +107,29 @@ class SiteManager(LockTable):
             None
         
         Side effects:
-            - Wipe out the lock table and the waits_for graph
-            - Set all replicated variables to "unavailable"
+            None
         """
         # Re-initialize lock table
         super().__init__(self.memory,self.site_number)
         # Set site down
         self.alive = False
         
-    def recover(self):
+    def recover(self,time):
         """
         Simulate site recovering. On recovery, we
-            - Reset 
+            - Set all replicated variables to "unavailable"
+            - Set site to alive
+            - Reset the site's uptime
+            
+        Args:
+            time: current time
+            
+        Returns:
+            None
+            
+        Side-effects:
+            None
         """
-        # Re-initialize lock table
-        super().__init__(self.memory,self.site_number)
-        # Load the most recent commit to memory
-        self.memory = {k:deepcopy(v) for k,v in self.disk[-1].snapshot.items()}
         
         # Set all replicated variables to "unavailable"
         for x in self.memory:
@@ -130,19 +138,14 @@ class SiteManager(LockTable):
                 
         # Set site to alive
         self.alive = True
+        self.uptime = time
         
-    def commit(self,T):
+    def commit(self,time):
         """
-        Commit state resulting from committed transaction
-        by storing to disk as a snapshot.
-        Note that we can't just write memory to disk -- as
-        memory can include writes from other non-committed transactions.
-        To address this, we will walk the lock table. We will
-        then undo any writes from transactions besides T which
-        currently hold a write lock.
+        Commit state to disk as a snapshot.
         
         Args:
-            T: Transaction
+            None
         
         Returns:
             None
@@ -153,25 +156,17 @@ class SiteManager(LockTable):
         """
         
         to_commit = {x:deepcopy(v) for x,v in self.memory.items()}
-        
-        for x in to_commit:
-            WL_holder = self.lock_table[x]['WL']
-            if (WL_holder is not None) and (WL_holder != T.name):
-                to_commit[x].undo_write()
-        
         snapshot = Snapshot(
-            time=self.time,
+            time=time,
             snapshot = to_commit
         )
         self.disk.append(snapshot)
         
-    def abort(self,T):
+    def end(self,T):
         """
-        Abort transaction T. Aborting involves two steps:
-            1. If T holds a WL on variable x, we need to undo the
-               write to x.
-            2. We need to release all of Ts locks, and remove it
-               from the waits-for graph.
+        Clean up after transaction T is aborted or committed. Either case involves
+        releasing all of Ts locks, removing it from the waits-for graph, and 
+        reassigning locks as needed.
         
         Args:
             T: Transaction
@@ -180,15 +175,9 @@ class SiteManager(LockTable):
             None
         
         Side effects:
-            - Undo's all of T's writes in memory
             - Releases all of Ts locks
+            - Gives locks to waiters
             - Remove T from the waits-for graph (along with incident edges)
         """
-        
-        # Step 1 -- undo writes in memory
-        T_WLs = T.write_locks[self.site_number]
-        for x in T_WLs:
-            self.memory[x].undo_write()
-        
-        # Step 2 -- release all locks and update waits-for graph
-        self.scrub_transaction_from_table(T)
+        # Release all locks and update waits-for graph
+        self.remove_T_from_lock_table_and_waitsfor(T)
