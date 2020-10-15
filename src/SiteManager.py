@@ -6,6 +6,24 @@ from copy import deepcopy
 Snapshot = namedtuple('Snapshot', ['time', 'snapshot'])
 
 class SiteManager(LockTable):
+    """Class for the site manager. Inherits from LockTable,
+    since the LockTable is the core component of the SiteManager.
+
+    Attributes
+    ----------
+    site_number : int (1-10)
+        Site number
+    uptime : int
+        The beginning of the current up period for the site.
+    alive : bool
+        True if the site is currently alive
+    memory : dict mapping variable names (e.g. x1) to Variable object
+        Current state of the site
+    disk : list of site snapshots
+        Each snapshot has a snapshot time, and stores the state of the
+        site memory as that time. A new snapshot is added whenver the
+        site commits.
+    """
     
     N_VARS = 20
     
@@ -36,21 +54,22 @@ class SiteManager(LockTable):
         
         
     def read_from_disk(self,T,x):
-        """
-        Transaction T reads x from disk, by reading the most recent
+        """ Transaction T reads x from disk, by reading the most recent
         snapshot committed before T began. Note our implementation
-        allows commits where a variable is not available -- so we need
-        to ensure we return a snapshot where x is available
+        allows commits of non-available variables -- so we need
+        to check we read x from a snapshot where it is available.
         
-        Args:
-            T: Transaction
-            x: variable
+        Parameters
+        ----------
+        T : Transaction
+            Transaction requesting read on x
+        x : Variable name
+            Name of variable to read
             
-        Returns:
-            Commit time of snapshot read from disk, and value read by T
-            
-        Side effects:
-            None
+        Returns
+        -------
+        int, any
+            Commit time of snapshot read, value of x in that commit
         """
         
         # Get most recent snapshot on disk by traversing in reversed
@@ -61,53 +80,43 @@ class SiteManager(LockTable):
                 return snapshot.time, snapshot.snapshot[x].read()
         
     def read_from_memory(self,x):
-        """
-        Transaction T reads x from memory
+        """ Transaction T reads x from memory
         
-        Args:
-            T: Transaction
-            x: variable
+        Parameters
+        ----------
+        T : Transaction
+            Transaction requesting read on x
+        x : Variable name
+            Name of variable to read
             
-        Returns:
-            value read by T
-            
-        Side effects:
-            None
+        Returns
+        -------
+        any
+            Current value of x in memory
         """
         return self.memory[x].read()
         
             
     def write(self,x,v):
         """
-        Transaction T writes v to x.
-        
-            T: Transaction
-            x: variable
-            v: value written to x
-            
-        Returns:
-            None
-            
-        Side effects:
-            None
+        Transaction T writes v to x. Note called during commit
+        of a transaction -- so v is the value in the after image
+        of site.x for some transaction.
+
+        Parameters
+        ----------
+        x : Variable name
+            Name of variable to read
+        v : any
+            Value to write
         """
         self.memory[x].write(v)
         
     def fail(self):
-        """
-        Simulate site failing. Results in:
+        """ Simulate site failing. Results in:
             - Lock table being erased and waits_for graph being reset
               to the empty graph.
             - Site being set to down (i.e. alive=False)
-            
-        Args:
-            None
-            
-        Returns:
-            None
-        
-        Side effects:
-            None
         """
         # Re-initialize lock table
         super().__init__(self.memory,self.site_number)
@@ -115,20 +124,15 @@ class SiteManager(LockTable):
         self.alive = False
         
     def recover(self,time):
-        """
-        Simulate site recovering. On recovery, we
+        """ Simulate site recovering. On recovery, we
             - Set all replicated variables to "unavailable"
             - Set site to alive
             - Reset the site's uptime
             
-        Args:
-            time: current time
-            
-        Returns:
-            None
-            
-        Side-effects:
-            None
+        Parameters
+        ----------
+        time : int
+            Current time (for resetting uptime)
         """
         
         # Set all replicated variables to "unavailable"
@@ -141,18 +145,12 @@ class SiteManager(LockTable):
         self.uptime = time
         
     def commit(self,time):
-        """
-        Commit state to disk as a snapshot.
+        """ Commit state to disk as a snapshot.
         
-        Args:
-            None
-        
-        Returns:
-            None
-        
-        Side effects:
-            - Adds a new snapshot to memory (labelled with the
-              current time).
+        Parameters
+        ----------
+        time : int
+            Current time (for timestamping snapshot)
         """
         
         to_commit = {x:deepcopy(v) for x,v in self.memory.items()}
@@ -163,21 +161,18 @@ class SiteManager(LockTable):
         self.disk.append(snapshot)
         
     def end(self,T):
-        """
-        Clean up after transaction T is aborted or committed. Either case involves
+        """ Clean up after transaction T is aborted or committed. Either case involves
         releasing all of Ts locks, removing it from the waits-for graph, and 
         reassigning locks as needed.
         
-        Args:
-            T: Transaction
+        Parameters
+        ----------
+        T : ReadWriteTransaction
+            Transaction to commit
         
-        Returns:
-            None
-        
-        Side effects:
-            - Releases all of Ts locks
-            - Gives locks to waiters
-            - Remove T from the waits-for graph (along with incident edges)
+        See Also
+        --------
+        LockTable.remove_T_from_lock_table_and_waitsfor
         """
         # Release all locks and update waits-for graph
         self.remove_T_from_lock_table_and_waitsfor(T)

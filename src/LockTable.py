@@ -6,6 +6,23 @@ LockTableResponse = namedtuple('LockTableResponse', ['response', 'transactions']
 
 class LockTable(object):
     """LockTable for a single site.
+
+    Attributes
+    ----------
+    site_number : int 1-10
+        Site number (1-10)
+    lock_table : dict of dicts
+        The lock table is a dict, keyed by the variable names. Each
+        variable name maps to three objects:
+            RL: set
+                A set of Transactions currently holding read-locks on x
+            WL: Transaction or None
+                Transaction currently holding (exclusive) write-lock on x
+            waiting: deque
+                A deque of LockRequests, each with a transaction and the
+                requested lock type
+    waits_for : networkx.DiGraph
+        A digraph with waits-for edges for locks at this specific site.
     """
     def __init__(self,variables,site_number):
         
@@ -21,26 +38,29 @@ class LockTable(object):
         self.waits_for = nx.DiGraph()
         
     def RL_available(self,T,x):
-        """
-        Check if transaction T can get a read lock on x. A transaction
-        can get a read lock if:
+        """ Check if transaction T can get a read lock on x. A transaction
+        can get a read lock on x if:
             - It already holds a read lock or a write lock on x
             - It does not already hold a sufficient lock, and no
               other transactions are either (i) currently holding a 
-              write lock, or (ii) has a write-lock request waiting in the
+              write lock, or (ii) have write-lock requests waiting in the
               queue.
         
-        Args: 
-            T: transaction requesting RL
-            x: variable for which RL is requested
+        Parameters 
+        ----------
+        T : ReadWriteTransaction
+            Transaction requesting RL on x
+        x : Variable name
+            Variable for which RL is requested
             
-        Returns:
-            bool: True if RL available, false if not
-            set: Set of transactions for which T would need to wait for RL.
-                 Empty if lock is available.
-            
-        Side effects:
-            None                
+        Returns
+        -------
+        LockTableResponse, with
+            response : bool
+                True if RL available, False if not
+            transactions : set
+                Set of transactions for which T would need to wait for RL.
+                Empty if lock is available.          
         """
         holding_write_lock = self.lock_table[x]['WL']
         waiting_for_write_lock = set(other.transaction for other in self.lock_table[x]['waiting']
@@ -67,31 +87,39 @@ class LockTable(object):
                                      transactions=set())
         
     def WL_available(self,T,x):
-        """
-        Check if transaction T can get write lock on x. A transaction can get a write
+        """ Check if transaction T can get write lock on x. A transaction can get a write
         lock on x if
             - it already holds a write-lock on x
-            - it holds a read-lock on x, and there are no other transactions waiting
-              in the queue for a lock on x. Note it would be possible for T to hold
-              a RL on x, and thus create a queue (if there is a T' requesting a WL,
-              followed by any sequence of transactions)
-            - No transactions are holding either a read or write lock on x
+            - it holds a read-lock on x (implying no other T' has a WL), and there
+              are no other transactions waiting in the queue for a lock on x. Note it
+              would be possible for T to hold a RL on x, and thus create a queue
+              (if there is a T' requesting a WL, followed by any sequence of read
+              or write lock requests)
+            - No transactions are holding either a read or write lock on x and no
+              transactions are waiting on a lock (this is defensive -- this should
+              not occur in this implementation).
         In any other case, (i) some transaction has lock on x, and/or (ii) other
         transactions are waiting for a lock -- so this lock request waits for
         all other transactions.
         
-        Args: 
-            T: transaction requesting WL
-            x: variable for which WL is requested
+        Parameters 
+        ----------
+        T : ReadWriteTransaction
+            Transaction requesting WL on x
+        x : Variable name
+            Variable for which WL is requested
             
-        Returns:
-            bool: True if WL available, false if not
-            set: Set of transactions for which T would need to wait for the WL.
-                 Empty if lock is available.
-            
-        Side effects:
-            None
+        Returns
+        -------
+        LockTableResponse, with
+            response : bool
+                True if WL available, False if not
+            transactions : set
+                Set of transactions for which T would need to wait for WL.
+                Empty if lock is available.
         """
+        
+        waiting_for_lock = set(other.transaction for other in self.lock_table[x]['waiting'])
         
         # Case 1 -- T already has WL
         if (self.lock_table[x]['WL'] == T):
@@ -99,15 +127,14 @@ class LockTable(object):
                                      transactions=set())
             
         # Case 2 -- T already has RL and no T' are waiting for locks
-        if ((T in self.lock_table[x]['RL']) and 
-            (len(self.lock_table[x]['waiting'].difference([T])) == 0)):
+        if ((T in self.lock_table[x]['RL']) and (len(waiting_for_lock) == 0)):
             return LockTableResponse(response=True,
                                      transactions=set())
             
         # Case 3 -- no locks held and no waiters
         if ((self.lock_table[x]['WL'] is None) and 
             (len(self.lock_table[x]['RL']) == 0) and 
-            (len(self.lock_table[x]['waiting']) == 0)):
+            (len(waiting_for_lock) == 0)):
             return LockTableResponse(response=True,
                                      transactions=set())
             
@@ -127,9 +154,9 @@ class LockTable(object):
             waiting_for = waiting_for.union(other_transactions_w_RLs)
             
         # Waits for any other transactions waiting for a lock
-        other_transactions_waiting = set(self.lock_table[x]['waiting']).difference([T])
+        other_transactions_waiting = waiting_for_lock.difference([T])
         if other_transactions_waiting is not None:
-            waiting_for = waiting_for.union(other_transactions_waiting)\
+            waiting_for = waiting_for.union(other_transactions_waiting)
             
         return LockTableResponse(
             response=False,
@@ -138,141 +165,76 @@ class LockTable(object):
         
         
     def give_transaction_WL(self,T,x):
-        """
-        Gives transaction T a WL on x.
+        """ Gives transaction T a WL on x.
         
-        Args: 
+        Parameters 
             T: transaction requesting lock
             x: variable for which lock is requested
             
-        Returns:
-            None
+        Parameters 
+        ----------
+        T : ReadWriteTransaction
+            Transaction requesting WL on x
+        x : Variable name
+            Variable for which WL is requested
             
-        Side effects:
-            - Set WL entry to T
-            - Add this site to T's WLs
-            
+        Side effects
+        ------------
+        - Updates both the LockTable, and the set of WL's held by T
         """
         self.lock_table[x]['WL'] = T
         T.write_locks[self].add(x)
     
     def give_transaction_RL(self,T,x):
-        """
-        Gives transaction T a RL on x.
-        
-        Args: 
-            T: transaction requesting lock
-            x: variable for which lock is requested
+        """ Gives transaction T a RL on x.
             
-        Returns:
-            None
+        Parameters 
+        ----------
+        T : ReadWriteTransaction
+            Transaction requesting RL on x
+        x : Variable name
+            Variable for which RL is requested
             
-        Side effects:
-            - Add T to x's RL set
-            - Add site.x to T's currently held read_locks
+        Side effects
+        ------------
+        Updates both the LockTable, and the set of RL's held by T
         """
         self.lock_table[x]['RL'].add(T)
         T.read_locks[self].add(x)
         
-    def release_WL(self,T,x):
-        """
-        Release transaction T's WL on x. Note this
-        does not trigger the transfer of the lock to the
-        next transaction in the queue. That waits for the end
-        of the tick.
-        
-        Args:
-            T: Transaction holding WL on x
-            x: variable for which lock is hold
-            
-        Returns:
-            None
-            
-        Side effects:
-            - Releases lock
-        """
-        self.lock_table[x]['WL'] = None
-        T.write_locks[self].remove(x)
-    
-    def release_RL(self,T,x):
-        """
-        Release transaction T's RL on x. Note this
-        does not trigger the transfer of the lock to the
-        next transaction in the queue. That waits for the end
-        of the tick.
-        
-        Args:
-            T: Transaction holding RL on x
-            x: variable for which lock is hold
-            
-        Returns:
-            None
-            
-        Side effects:
-            - Releases lock
-        """
-        self.lock_table[x]['RL'].remove(T)
-        T.read_locks[self].remove(x)
-        
     def add_transaction_to_lock_queue(self,T,x,waiting_for,lock_type):
-        """
-        Adds transaction T to the queue for a lock on variable x.
-        
-        Args: 
-            T: transaction requesting lock
-            x: variable for which lock is requested
-            waiting_for: set of transactions blocking T's request for the x lock
-            lock_type: type of lock being requested (WL or RL)
+        """ Adds transaction T to the queue for a lock on variable x,
+        and updates the waits-for graph.
             
-        Returns:
-            None
-            
-        Side effects:
-            - Adds the T's lock request on x to x's queue
-            - Adds edges to the waits-for graph from T to each transaction in waiting_for
+        Parameters 
+        ----------
+        T : ReadWriteTransaction
+            Transaction requesting lock on x
+        x : Variable name
+            Variable for which lock is requested
+        waiting_for : set 
+            Set of transactions blocking T's request for the x lock
+        lock_type : str (RL or WL)
+            Type of lock requested
         """
         self.lock_table[x]['waiting'].append(LockRequest(transaction=T,lock_type=lock_type))
         for other in waiting_for:
             self.waits_for.add_edge(T,other)
-        
-    def waits_for_has_cycles(self):
-        """
-        Check for cycles in the waits_for graph.
-        
-        Args:
-            None
-            
-        Returns:
-            bool: True if waits_for graph has cycles
-            set: Set of transactions in the detected cycle in the waits for graph.
-                 Empty set if no cycles
-                 
-        Side effects:
-            None
-        """
-        try:
-            cycle = nx.algorithms.cycles.find_cycle(self.waits_for)
-            nodes_in_cycle = set()
-            for e in cycle:
-                for task in e:
-                    nodes_in_cycle.add(task)
-            return LockTableResponse(response=True,transactions=nodes_in_cycle)
-        except nx.NetworkXNoCycle:
-            return LockTableResponse(response=False,transactions=set())
     
     def reassign_locks(self,x):
         """
-        Reassign locks (as needed) for variable x
+        Reassign locks (as needed) for variable x. Called after a
+        Transaction is ended (committed or aborted), when locks are released.
         
-        Args:
-            x: variable to reassign locks
+        Parameters 
+        ----------
+        x : Variable name
+            Variable to reassign locks for
             
-        Returns:
-            None
-            
-        Side effects:
-            If locks reassigned, updates the locks held by transactions
-            given new locks
+        Side effects
+        ------------
+        - If locks reassigned, updates the locks held by transactions
+          given new locks
         """
         gave_new_lock = True
         waiters = self.lock_table[x]['waiting']
@@ -307,21 +269,22 @@ class LockTable(object):
                     # Put this transaction back at front of queue
                     self.lock_table[x]['waiting'].appendleft(next_in_line)
         
-        
     def remove_T_from_lock_table_and_waitsfor(self,T):
         """
         Completely removes T from the lock table and waits
         for graph, and updates the lock table (reassigning locks).
         
-        Args: 
-            T: transaction requesting lock
+        Parameters 
+        ----------
+        T : ReadWriteTransaction
+            Transaction requesting lock
             
-        Returns:
-            None
-            
-        Side effects:
-            - Remove T from the lock table.
-            - Remove T from the waits_for graph
+        Side effects
+        ------------
+        - Remove T from the lock table
+        - Remove T from the waits_for graph
+        - Reassigns locks (where there were blocked transactions
+          waiting on the lock)
         """
         for x,row in self.lock_table.items():
             # Remove T from the RL set if it is present
