@@ -168,7 +168,7 @@ class ReadWriteTransaction(Transaction):
             
             # Otherwise we'll have to keep waiting
             else:
-                return WriteResponse(success=False,callback=lambda: self.try_again(),transaction=self)
+                return WriteResponse(success=False,callback=self.try_again,transaction=self)
                     
         elif isinstance(self.next_op,ReadOp):
             has_all_needed_locks = True
