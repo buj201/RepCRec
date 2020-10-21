@@ -90,9 +90,9 @@ class LockTable(object):
         """ Check if transaction T can get write lock on x. A transaction can get a write
         lock on x if
             - it already holds a write-lock on x
-            - it holds a read-lock on x (implying no other T' has a WL), and there
-              are no other transactions waiting in the queue for a lock on x. Note it
-              would be possible for T to hold a RL on x, and thus create a queue
+            - it is the only transaction holding a read-lock on x (implying no T' has a WL),
+              and there are alos no other transactions waiting in the queue for a lock on x.
+              Note it would be possible for T to hold a RL on x, and thus create a queue
               (if there is a T' requesting a WL, followed by any sequence of read
               or write lock requests)
             - No transactions are holding either a read or write lock on x and no
@@ -126,8 +126,10 @@ class LockTable(object):
             return LockTableResponse(response=True,
                                      transactions=set())
             
-        # Case 2 -- T already has RL and no T' are waiting for locks
-        if ((T in self.lock_table[x]['RL']) and (len(waiting_for_lock) == 0)):
+        # Case 2 -- T is the only transaction with a RL and no T' are waiting for locks
+        if ((T in self.lock_table[x]['RL']) and 
+            (len(self.lock_table[x]['RL']) == 1) and 
+            (len(waiting_for_lock) == 0)):
             return LockTableResponse(response=True,
                                      transactions=set())
             

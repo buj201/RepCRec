@@ -1,4 +1,5 @@
 # Question: When T2 reads x2, the most recent committed copy on a live site will read x=20. But -- there is a more recent commit (on site 1) with x2=100. What should happen?
+# RO should not access a site that has been down and recovered, since these sites shouldn't be available to any read (read-write or read-only)
 fail(2)
 fail(3)
 fail(4)

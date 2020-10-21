@@ -1,5 +1,5 @@
 from collections import defaultdict,namedtuple
-from src.nts import ReadResponse, WriteResponse, WriteOp, ReadOp
+from src.nts import Response,ReadOp,WriteOp
 from copy import deepcopy
 
 class Transaction(object):
@@ -84,7 +84,6 @@ class ReadWriteTransaction(Transaction):
         if site not in self.first_accessed:
             self.first_accessed[site] = time
         
-    
     def read(self,site,x,time):
         """ Read site.x from the after_image, if this transaction
         has previously written to site.x. Otherwise read
@@ -142,57 +141,65 @@ class ReadWriteTransaction(Transaction):
             
         Returns
         -------
-        Response
-            ReadResponse if next_op is a ReadOp, or WriteResponse if
-            next_op is a WriteOp
-        """
+        nts.Response
         
+        See Also
+        --------
+        nts.Response
+        """
+
+        # Check if we're holding all required locks
+        has_all_needed_locks = True
+        x = self.next_op.x
+        for site in self.locks_needed:
+            if isinstance(self.next_op,WriteOp) and (x not in self.write_locks[site]):
+                has_all_needed_locks = False
+            if isinstance(self.next_op,ReadOp) and (x not in self.read_locks[site]):
+                has_all_needed_locks = False
+
+        # If we have all required locks, and we're writing, then we can write
         if isinstance(self.next_op,WriteOp):
-            has_all_needed_locks = True
-            
-            # Find the variable we want to write
-            x = self.next_op.x
-            
-            # See if we're now holding locks on x at all sites needed
-            for site in self.locks_needed:
-                if x not in self.write_locks[site]:
-                    has_all_needed_locks = False
-                    
-            # If so, then we can write and unblock the transaction
+            v = self.next_op.v
             if has_all_needed_locks:
                 for site in self.locks_needed:
                     self.write(site,x,self.next_op.v,time)
                 self.locks_needed = defaultdict(set)
                 self.next_op = None
-                return WriteResponse(success=True,callback=None,transaction=self)
-            
-            # Otherwise we'll have to keep waiting
+                return Response(transaction=self,x=x,v=v,
+                                operation='W',success=True,callback=None)
             else:
-                return WriteResponse(success=False,callback=self.try_again,transaction=self)
-                    
-        elif isinstance(self.next_op,ReadOp):
-            has_all_needed_locks = True
-            
-            # Find the variable we want to write
-            x = self.next_op.x
-            
-            # See if we're now holding locks on x at target site
-            for site in self.locks_needed:
-                if x not in self.read_locks[site]:
-                    has_all_needed_locks = False
-                    
-            # If so read x
+                return Response(transaction=self,x=x,v=v,
+                                operation='W',success=False,callback=self.try_again)
+        # If we have all required locks, and we're reading, proceed
+        if isinstance(self.next_op,ReadOp):
             if has_all_needed_locks:
                 for site in self.locks_needed:
                     # Should only execute once.
                     v = self.read(site,x,time)
                 self.locks_needed = defaultdict(set)
                 self.next_op = None
-                
-                print(f'{self.name}: {x}={v}')
-                return ReadResponse(success=True,callback=None,value=v,transaction=self)
+                return Response(transaction=self,x=x,v=v,
+                                operation='R',success=True,callback=None)
+
+            # Otherwise we'll have to keep waiting
             else:
-                return ReadResponse(success=False,callback=self.try_again,value=None,transaction=self)
+                return Response(transaction=self,x=x,v=None,
+                                operation='R',success=False,callback=self.try_again)
+                        
+    def drop_requests_at_dead_sites(self):
+        """ If the transaction is waiting for a lock at a site,
+        and that site is dead, drop this lock from locks_needed.
+
+        Side effects
+        ------------
+        None
+        """
+        sites_to_del = []
+        for site in self.locks_needed:
+            if not site.alive:
+                sites_to_del.append(site)
+        for site in sites_to_del:
+            del self.locks_needed[site]
 
     def can_commit(self):
         """ Check if this transaction can commit (on end request), by

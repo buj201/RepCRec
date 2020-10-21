@@ -1,4 +1,3 @@
-# Question: in my implementation, T2 is waiting for locks on sites 2-10. When site 1 recovers, should T2 request the additional lock?
 begin(T1)
 begin(T2)
 fail(1)

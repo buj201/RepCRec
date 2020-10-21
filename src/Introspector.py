@@ -104,14 +104,7 @@ app.layout = html.Div([
     html.Button('Tick', id='ticker', n_clicks=0),
     html.H4("Time = 0",id='clock',style={'padding-bottom':25}),
     html.H4("Choose a Site:",id='site-header',style={'padding-top':25}),
-    dcc.Slider(
-        id='site',
-        min=1,
-        max=10,
-        value=1,
-        step=None,
-        marks={v:str(v) for v in range(1,11)}
-    ),
+    dcc.Slider(id='site',min=1,max=10,value=1,step=None,marks={v:str(v) for v in range(1,11)}),
     html.Div(id='slider-output',style={'padding-top':25}),
     html.Div([html.Img(id = 'cur_plot', src = '')], id='plot_div'),
     html.Div([dash_table.DataTable(id='detailed_site_table')],style={'padding-bottom':25}),
