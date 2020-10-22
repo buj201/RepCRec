@@ -75,7 +75,14 @@ def rep_transaction(T):
     else:
         read_locks = {k.site_number: v for k,v in TM.transactions[T].read_locks.items() if len(v)>0}
         write_locks = {k.site_number: v for k,v in TM.transactions[T].write_locks.items() if len(v)>0}
-        next_op = TM.transactions[T].next_op
+        blocked_request = TM.transactions[T].blocked_request
+        if blocked_request is not None:
+            next_op = f"{blocked_request.operation}({blocked_request.x}"
+            if blocked_request.v is not None:
+                next_op += f"{blocked_request.v}"
+            next_op += ')'
+        else:
+            next_op = ''
         locks_needed = {k.site_number: v for k,v in TM.transactions[T].locks_needed.items() if len(v)>0}
         m = dcc.Markdown(f"#### Transaction {T}:\n* Start Time = {start_time}\n* Read-only = {read_only}" +\
                          f"\n* Read locks = {read_locks}\n* Write locks = {write_locks}"+\
@@ -217,7 +224,7 @@ def update_T_div(T):
     [Input('clock', 'children')]
 )
 def update_tm_div(T):
-    transaction_queue = [t.transaction.name for t in TM.transaction_queue]
+    request_queue = [t.transaction.name for t in TM.request_queue]
     composed_graph = TM.compose_waits_for_graphs()
     fig,ax=plt.subplots(figsize=(9,6))
     nx.draw_networkx(composed_graph, 
@@ -226,7 +233,7 @@ def update_tm_div(T):
     out_url = fig_to_uri(fig)
     
     r = [
-        html.H6(f'Transactions in queue: {transaction_queue}'),
+        html.H6(f'Transactions in queue: {request_queue}'),
         html.H6('Composed waits-for graphs:'),
         html.Div([html.Img(id = 'composed-g', src = out_url)], id='composed-div')
     ]

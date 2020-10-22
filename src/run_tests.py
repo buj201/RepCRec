@@ -32,8 +32,10 @@ for t in tests:
         
         sys.stdout = sys.__stdout__
         print(f'Test {t} failed. Diff:')
-        print(pd.concat([pd.Series(target_output_lines),
-                         pd.Series(output_lines)],axis=1))
+        r = pd.concat([pd.Series(target_output_lines),
+                         pd.Series(output_lines)],axis=1)
+        r.columns = ['Target output','Actual output']
+        print(r)
         #raise ValueError('Test failed. Aborting.')
     else:
         sys.stdout = sys.__stdout__

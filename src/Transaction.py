@@ -1,5 +1,5 @@
 from collections import defaultdict,namedtuple
-from src.nts import Response,ReadOp,WriteOp
+from src.request_response import Request
 from copy import deepcopy
 
 class Transaction(object):
@@ -17,14 +17,14 @@ class Transaction(object):
         self.start_time = start_time
         self.name = name
 
-
 class ReadOnlyTransaction(Transaction):
     """Read only transaction.
     """
     def __init__(self,name,start_time):
         super().__init__(name,start_time)
         self.read_only = True
-        
+    def drop_locks_at_dead_sites(self,dead_sites):
+        pass
 
 class ReadWriteTransaction(Transaction):
     """Read write transaction, which obtains locks
@@ -42,12 +42,11 @@ class ReadWriteTransaction(Transaction):
         by this transaction
     after_image : dict of dicts, mapping SiteManagers to variable:value pairs
         After image for writes to each site by this transaction
-    next_op : None, WriteOp, or ReadOp
-        If this transaction is blocked due to lock conflicts, stores details
-        regarding the blocked request (variable, value for write requests)
+    blocked_request : None or Request
+        If this transaction is blocked, store the next request
     locks_needed : dict of SiteManager:set
-        Locks needed by the transaction, at each site, in order for the blocked
-        next_op to proceed.
+        Locks needed by the transaction, at each site, in order for
+        blocked_request to proceed.
     """
     def __init__(self,name,start_time):
         super().__init__(name,start_time)
@@ -57,19 +56,32 @@ class ReadWriteTransaction(Transaction):
         self.read_locks = defaultdict(set)
         self.write_locks = defaultdict(set)
         
+        # Store state for blocked request. If lock-blocked, then request can 
+        # only proceed when it has been given all the locks it needs
+        self.blocked_request = None
+        self.locks_needed = defaultdict(set)
+        
         # Sites accessed by this transaction
         self.first_accessed = dict()
         
         # After image for writes by this transaction
         self.after_image = defaultdict(dict)
-        
-        # Store state for blocked operations -- the transaction can only
-        # proceed when it has been given all the locks it needs
-        self.next_op = None
-        self.locks_needed = defaultdict(set)
     
+    def waiting_on_locks(self):
+        """Check if the transaction is waiting on locks.
+        If so, then the request has already been routed
+        to a live site, and we can simply check if we've been
+        given the required locks by calling `try_again`.
+
+        Returns
+        -------
+        Bool
+        """
+        b = len(self.locks_needed)>0
+        return b
+
     def update_first_accessed(self,site,time):
-        """ Utility to update first accessed. If this
+        """Utility to update first accessed. If this
         is the first time the transaction is accessing
         the site, then we set first_accessed for this site to time.
         Otherwise we don't update.
@@ -85,7 +97,7 @@ class ReadWriteTransaction(Transaction):
             self.first_accessed[site] = time
         
     def read(self,site,x,time):
-        """ Read site.x from the after_image, if this transaction
+        """Read site.x from the after_image, if this transaction
         has previously written to site.x. Otherwise read
         directly from the sites memory.
         
@@ -112,7 +124,7 @@ class ReadWriteTransaction(Transaction):
             return site.read_from_memory(x)
         
     def write(self,site,x,v,time):
-        """ Write to the transaction's after-image of site.x
+        """Write to the transaction's after-image of site.x
         
         Parameters
         ----------
@@ -129,7 +141,7 @@ class ReadWriteTransaction(Transaction):
         self.after_image[site][x] = deepcopy(v)
     
     def try_again(self,time):
-        """ Main callback for re-trying operations blocked due to
+        """Main callback for re-trying operations blocked due to
         lock conflicts. Checks if the holding all required locks,
         and, if so, proceeds with the blocked operation.
         
@@ -141,68 +153,49 @@ class ReadWriteTransaction(Transaction):
             
         Returns
         -------
-        nts.Response
+        nts.Request
         
         See Also
         --------
-        nts.Response
+        nts.Request
         """
-
         # Check if we're holding all required locks
         has_all_needed_locks = True
-        x = self.next_op.x
+        x = self.blocked_request.x
         for site in self.locks_needed:
-            if isinstance(self.next_op,WriteOp) and (x not in self.write_locks[site]):
+            if (self.blocked_request.operation=='W') and (x not in self.write_locks[site]):
                 has_all_needed_locks = False
-            if isinstance(self.next_op,ReadOp) and (x not in self.read_locks[site]):
+            if (self.blocked_request.operation=='R') and (x not in self.read_locks[site]):
                 has_all_needed_locks = False
 
         # If we have all required locks, and we're writing, then we can write
-        if isinstance(self.next_op,WriteOp):
-            v = self.next_op.v
-            if has_all_needed_locks:
-                for site in self.locks_needed:
-                    self.write(site,x,self.next_op.v,time)
-                self.locks_needed = defaultdict(set)
-                self.next_op = None
-                return Response(transaction=self,x=x,v=v,
-                                operation='W',success=True,callback=None)
-            else:
-                return Response(transaction=self,x=x,v=v,
-                                operation='W',success=False,callback=self.try_again)
+        if (self.blocked_request.operation=='W') and has_all_needed_locks:
+            v = self.blocked_request.v
+            for site in self.locks_needed:
+                self.write(site,x,self.blocked_request.v,time)
+            self.locks_needed = defaultdict(set)
+            self.blocked_request = None
+            return Request(transaction=self,x=x,v=v,
+                            operation='W',success=True,callback=None)
+        elif (self.blocked_request.operation=='W') and not has_all_needed_locks:
+            return Request(transaction=self,x=x,v=self.blocked_request.v,
+                           operation='W',success=False,callback=self.try_again)
+        
         # If we have all required locks, and we're reading, proceed
-        if isinstance(self.next_op,ReadOp):
-            if has_all_needed_locks:
-                for site in self.locks_needed:
-                    # Should only execute once.
-                    v = self.read(site,x,time)
-                self.locks_needed = defaultdict(set)
-                self.next_op = None
-                return Response(transaction=self,x=x,v=v,
-                                operation='R',success=True,callback=None)
-
-            # Otherwise we'll have to keep waiting
-            else:
-                return Response(transaction=self,x=x,v=None,
-                                operation='R',success=False,callback=self.try_again)
-                        
-    def drop_requests_at_dead_sites(self):
-        """ If the transaction is waiting for a lock at a site,
-        and that site is dead, drop this lock from locks_needed.
-
-        Side effects
-        ------------
-        None
-        """
-        sites_to_del = []
-        for site in self.locks_needed:
-            if not site.alive:
-                sites_to_del.append(site)
-        for site in sites_to_del:
-            del self.locks_needed[site]
+        elif (self.blocked_request.operation=='R') and has_all_needed_locks:
+            for site in self.locks_needed:
+                # Should only execute once.
+                v = self.read(site,x,time)
+            self.locks_needed = defaultdict(set)
+            self.blocked_request = None
+            return Request(transaction=self,x=x,v=v,
+                            operation='R',success=True,callback=None)
+        else:
+            return Request(transaction=self,x=x,v=None,
+                            operation='R',success=False,callback=self.try_again)
 
     def can_commit(self):
-        """ Check if this transaction can commit (on end request), by
+        """Check if this transaction can commit (on end request), by
         verifying that all of the sites it accessed have been live since
         the transaction first accessed the site.
             
@@ -216,3 +209,22 @@ class ReadWriteTransaction(Transaction):
             if (site.uptime >= self.first_accessed[site]) or (not site.alive):
                 all_sites_fully_alive = (False and all_sites_fully_alive)
         return all_sites_fully_alive
+
+    def drop_locks_at_dead_sites(self,dead_sites):
+        """Delete locks held at dead sites, and also remove these
+        sites from the locks needed list (e.g. the sites at which
+        this transaction is waiting for a lock).
+
+        Parameters
+        ----------
+        dead_sites : List of SiteManagers
+            Dead sites
+        
+        Returns
+        -------
+        None
+        """
+        for site in dead_sites:
+            self.locks_needed[site] = set()
+            self.write_locks[site] = set()
+            self.read_locks[site] = set()

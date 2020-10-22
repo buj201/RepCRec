@@ -220,6 +220,7 @@ class LockTable(object):
             Type of lock requested
         """
         self.lock_table[x]['waiting'].append(LockRequest(transaction=T,lock_type=lock_type))
+        T.locks_needed[self].add(x)
         for other in waiting_for:
             self.waits_for.add_edge(T,other)
     
@@ -246,13 +247,10 @@ class LockTable(object):
             requesting_T = next_in_line.transaction
             
             if (next_lock_type == 'RL'):
-                # Case 1: No transaction holds a WL
-                if (self.lock_table[x]['WL'] is None):
+                # Check if RL available
+                available, _ = self.RL_available(requesting_T,x)
+                if available:
                     self.give_transaction_RL(requesting_T,x)
-                # Case 2: requesting_T already has WL
-                elif (self.lock_table[x]['WL'] == requesting_T):
-                    self.give_transaction_RL(requesting_T,x)
-                # Case 3: some other transaction has WL
                 else:
                     gave_new_lock = False
                     # Put this transaction back at front of queue
@@ -260,12 +258,9 @@ class LockTable(object):
                     
             # Requesting WL
             else:
-                # Case 1: No other transaction holds a WL and no other transactions have
-                # read locks
-                if ((self.lock_table[x]['WL'] is None) and
-                    (len(self.lock_table[x]['RL'].difference([requesting_T]))==0)):
+                available, _ = self.WL_available(requesting_T,x)
+                if available:
                     self.give_transaction_WL(requesting_T,x)
-                # Otherwise we can't give out lock
                 else:
                     gave_new_lock = False
                     # Put this transaction back at front of queue
