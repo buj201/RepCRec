@@ -40,14 +40,14 @@ class TransactionManager(Parser):
         self.instructions = fileinput.input(test)
         self.request_queue = deque()
     
-    def main(self):
+    def main(self,debug=False):
         """Main function that reads entire input command.
         """
         done = False
         while not done:
-            done = self.tick()
+            done = self.tick(debug)
 
-    def backlogged_requests(self):
+    def has_backlogged_requests(self):
         """Has backlogged requests
         """
         return len(self.request_queue)>0
@@ -66,9 +66,9 @@ class TransactionManager(Parser):
         )
         return composed
     
-    def waits_for_cycle(self,composed_waits_for):
+    def get_waits_for_cycle(self,composed_waits_for):
         """
-        Check for cycles in the composed waits_for graph.
+        Return a cycle in the composed waits_for graph, if one exists.
         
         Parameters
         ----------
@@ -79,7 +79,7 @@ class TransactionManager(Parser):
         -------
         set
             Set of transactions in the detected cycle in the waits for graph.
-            Empty set if no cycles in the composed waits for graph.
+            None if no cycles in the composed waits for graph.
         """
         try:
             cycle = nx.algorithms.cycles.find_cycle(composed_waits_for)
@@ -90,7 +90,6 @@ class TransactionManager(Parser):
             return nodes_in_cycle
         except nx.NetworkXNoCycle:
             return None
-
 
     def identify_youngest_transaction_in_cycle(self):
         """Detect cycles in waits-for graph. If cycle(s)
@@ -103,7 +102,7 @@ class TransactionManager(Parser):
             transaction in a cycle (ex: T1).
         """
         composed_waits_for = self.compose_waits_for_graphs()
-        cycle = self.waits_for_cycle(composed_waits_for)
+        cycle = self.get_waits_for_cycle(composed_waits_for)
 
         if cycle is not None:
             ordered_by_age = sorted(cycle, key=lambda x: x.start_time)
@@ -123,40 +122,7 @@ class TransactionManager(Parser):
                 deadlocked = False
             else:
                 self.abort(youngest_transaction_in_cycle,'deadlock')
-
-    def refresh_write_lock_requests(self,next_request):
-        """Check if the write transaction needs to request write locks at any
-        sites that have come back on line. If so, request said locks.
-
-        Parameters
-        ----------
-        next_request : Request, for a "W" operation
-
-        Returns
-        -------
-        None
-
-        Side effects
-        ------------
-        Either adds the transaction to the lock queue, or gives the transaction
-        the write lock, at each site which is (i) alive, and (ii) the
-        transaction is not holding or waiting for a lock.
-        """
-        T = next_request.transaction
-        x = next_request.x
-        for site_number, site in self.sites.items():
-            if (site.alive) and (x in site.memory):
-                # Check that the transaction knows it needs the lock on site.x
-                if x not in T.locks_needed[site]:
-                    # If not, then we need to try to give T the lock, or
-                    # add it to the queue, and update T's lock_needed dict
-                    T.locks_needed[site].add(x)
-                    lock_available, waiting_for = site.WL_available(T,x)
-                    if lock_available:
-                        site.give_transaction_WL(T,x)
-                    else:
-                        site.add_transaction_to_lock_queue(T,x,waiting_for,'WL')
-                        
+                   
     def get_dead_sites(self):
         """Check site status, and return list of sites that are dead.
 
@@ -190,6 +156,39 @@ class TransactionManager(Parser):
         for T in self.transactions.values():
             T.drop_locks_at_dead_sites(dead_sites)
 
+    def refresh_transactions_write_lock_requests(self,next_request):
+        """Check if the write transaction has lock requests in at all
+        available sites. If not, request missing locks.
+
+        Parameters
+        ----------
+        next_request : Request, for a "W" operation
+
+        Returns
+        -------
+        None
+
+        Side effects
+        ------------
+        Either adds the transaction to the lock queue, or gives the transaction
+        the write lock, at each site which is (i) alive, and (ii) the
+        transaction is not holding or waiting for a lock.
+        """
+        T = next_request.transaction
+        x = next_request.x
+        for site_number, site in self.sites.items():
+            if (site.alive) and (x in site.memory):
+                # Check that the transaction knows it needs the lock on site.x
+                if x not in T.locks_needed[site]:
+                    # If not, then we need to try to give T the lock, or
+                    # add it to the queue, and update T's lock_needed dict
+                    T.locks_needed[site].add(x)
+                    lock_available, waiting_for = site.WL_available(T,x)
+                    if lock_available:
+                        site.give_transaction_WL(T,x)
+                    else:
+                        site.add_transaction_to_lock_queue(T,x,waiting_for,'WL')
+     
     def execute_next_request(self,next_request):
         """Execute the next blocked request.
 
@@ -203,27 +202,47 @@ class TransactionManager(Parser):
         -------
         Request
             A new Request object. If the Transaction is waiting on locks,
-            then it calls it's try_again callback.
-            If it isn't waiting on any locks, then it
-            gives up and goes back to the TM to be rerouted.
-        """
+            then it calls it's try_again callback. If it isn't waiting on any locks,
+            then it gives up and goes back to the TM to be rerouted.
 
-        # If the operation is a write, refresh the write lock requests
-        if next_request.operation == 'W':
-            self.refresh_write_lock_requests(next_request)
+        Side effects
+        ------------
+        - If the operation is a write, check that the operation is waiting
+          for the write lock at all live sites with the variable. If not,
+          request locks as needed so the write operation will write to all
+          available copies.
+        """
+        # If the request is for a non-read/write operation, then we call and
+        # return response
+        if next_request.operation in ['begin','beginRO','dump','end','fail','recover','success']:
+            response = next_request.callback(self.time)
+            return response
+
+        # If the operation is read-only, then the callback is either end or read.
+        # Don't worry about locks, etc.
+        if next_request.transaction.read_only:
+            response = next_request.callback(self.time)
+            return response
 
         # Check if the transaction is blocked due to lock conflicts
-        lock_blocked = next_request.transaction.waiting_on_locks()
+        lock_blocked = next_request.transaction.is_waiting_on_locks()
         
-        # If lock blocked, we simply call the try_again callback
+        # If lock blocked, we call the try_again callback after refreshing locks (for writes)
         if lock_blocked:
+            # If the operation is a write, refresh the write lock requests
+            if next_request.operation == 'W':
+                self.refresh_transactions_write_lock_requests(next_request)
             response = next_request.callback(self.time)
         else:
             # Otherwise, TM needs to try rerouting the request to live sites.
             if next_request.operation == 'W':
-                new_callback = lambda time: self.try_writing(T,next_request.x,next_request.v,time)
+                new_callback = lambda time: self.try_writing(next_request.transaction,
+                                                             next_request.x,next_request.v)
             elif next_request.operation == 'R':
-                new_callback = lambda time: self.route_read_write_read(T,next_request.x)
+                new_callback = lambda time: self.route_read_write_read(next_request.transaction,
+                                                                       next_request.x)
+            else:
+                raise ValueError('Invalid operation')
             # Call new callback function to get a new Request
             response = new_callback(self.time)
 
@@ -234,24 +253,14 @@ class TransactionManager(Parser):
         Note the request queue is a queue of blocked operations,
         where the requested operation is blocked due to either lock
         conflicts or due to failure.
-        
-        Side effects
-        ------------
-        - Deletes dead sites from each transaction lock sets.
-        - If the operation is a write, check that the operation is waiting
-          for the write lock at all live sites with the variable. If not,
-          request locks as needed so the write operation will write to all
-          available copies.
         """
         new_queue = deque()
+    
 
-        self.have_transactions_drop_locks_at_dead_sites()
-
-        while self.backlogged_requests():
+        while self.has_backlogged_requests():
             next_request = self.request_queue.popleft()
             # Try execution
             response = self.execute_next_request(next_request)
-                
             if not response.success:
                 # Push into new queue
                 new_queue.append(response)
@@ -262,103 +271,27 @@ class TransactionManager(Parser):
                     
         self.request_queue = new_queue
         
-        
-    def abort(self,T,msg):
-        """Abort transaction T at all sites. Aborting involves
-        the following steps.
-            - Ending the transaction at each site.
-            - Removing the transaction from the TransactionManager
-            - Removing any requests from this transaction still in
-              the request queue
-
-        
-        Parameters
-        ----------
-        T : Transaction
-            Transaction being aborted
-        msg : str
-            Reason for abort (currently either 'failure' or 'deadlock')
-            
-        Side effects
-        ------------
-        Remove T from all objects managed by either the
-        SiteManagers or the TransactionManager
-
-        See Also
-        --------
-        src.SiteManager.end
-        """
-        # End this transaction at all sites
-        for site_number,site in self.sites.items():
-            site.end(T)
-
-        # Delete this transaction
-        del self.transactions[T.name]
-        
-        # Update the request queue
-        new_q = deque()
-        while self.backlogged_requests():
-            next_t = self.request_queue.popleft()
-            if not next_t.transaction == T:
-                new_q.append(next_t)
-        self.request_queue = new_q
-        print(f'Aborting transaction {T.name} due to {msg}')
-
-    def commit(self,T):
-        """Commit a read-write transaction T by
-            - Writing each site's after-image to the corresponding site
-            - Ending the transaction at each site
-            - Removing the transaction from the TransactionManager
-        
-        Parameters
-        ----------
-        T : Transaction
-            Transaction to commit
-            
-        Side effects
-        ------------
-        Remove T from all objects managed by either the
-        SiteManagers or the TransactionManager
-
-        See Also
-        --------
-        src.SiteManager.end
-        """
-        for site in T.after_image:
-            # Write to memory
-            for x,v in T.after_image[site].items():
-                site.write(x,v)
-            # Then commit to disk
-            site.commit(self.time)
-        
-        # Remove T from each site. Note we
-        # need to do this separately from the above
-        # loop, since we need to handle sites where
-        # T only read.
-        for site in self.sites.values():
-            site.end(T)
-        
-        # Delete this transaction
-        del self.transactions[T.name]
-
-        print(f"{T.name} commits")
-    
-    def try_next_request(self,debug):
-        """Try executing the next requested operation.
+    def get_next_new_request(self,debug):
+        """Get next request
 
         Parameters
         ----------
         debug : bool
             If debug, print the next instruction.
+
+        Returns
+        -------
+        Request
+            Next request. If None, then simulation is over.
         """
         try:
             next_instruction = self.instructions.__next__()
             if debug:
                 print(next_instruction)
-            self.p_line(next_instruction)
-            return False
+            request = self.parse_line(next_instruction)
+            return request
         except StopIteration:
-            return True
+            return None
 
     def tick(self,debug=False):
         """Advance time by one step. When we advance time, we:
@@ -376,6 +309,7 @@ class TransactionManager(Parser):
         bool
             True if input instructions exhausted, False if not
         """
+        end_of_instructions = False
         
         # Step 0: Increment time
         self.time += 1
@@ -383,11 +317,17 @@ class TransactionManager(Parser):
         # Step 1: Detect deadlocks and abort transactions
         self.unlock_deadlocks()
 
-        # Step 2: Try executing callbacks in queue
+        # Step 2: Get next request and add to request queue
+        new_request = self.get_next_new_request(debug)
+        if new_request is not None:
+            self.request_queue.append(new_request)
+        else:
+            end_of_instructions = True
+
+        # Step 3: Try executing callbacks in queue
         self.sweep_request_queue()
         
-        # Step 3: Execute next instruction
-        return self.try_next_request(debug)
+        return end_of_instructions
 
     def route_read_only_read(self,T,x):
         """ Route a read-only read request from transaction T for variable x.
@@ -432,7 +372,8 @@ class TransactionManager(Parser):
         else:
             # Didn't find such a server -- so need to try to find one at next tick
             response = Request(transaction=T,x=x,v=None,
-                                operation='R',success=False,callback=lambda time: self.route_read_only_read(T,x))
+                                operation='R',success=False,
+                                callback=lambda time: self.route_read_only_read(T,x))
         return response
         
     def route_read_write_read(self,T,x):
@@ -493,21 +434,16 @@ class TransactionManager(Parser):
             # to get this read lock at this site
             response = Request(transaction=T,x=x,v=None,
                             operation='R',success=False,callback=T.try_again)
-
-            
-            # Updated transactions blocked_request
             T.blocked_request = response
             return response
         
         # If there are no live sites with x available, then we need to give up and
         # retry later
-
         response = Request(transaction=T,x=x,v=None,
                            operation='R',success=False,callback=lambda time: self.route_read_write_read(T,x))
 
         T.blocked_request = response
-        return response
-    
+        return response 
         
     def try_reading(self,T,x):
         """Dispatch read request based on whether T is a
@@ -522,7 +458,9 @@ class TransactionManager(Parser):
             
         Returns
         -------
-        None, but prints to read response message to stdout if successful
+        Response
+            Returns Response object.
+            Note also prints read response message to stdout if successful
             
         See Also
         --------
@@ -533,13 +471,8 @@ class TransactionManager(Parser):
             response = self.route_read_only_read(T,x)
         else:
             response = self.route_read_write_read(T,x)
-                                                 
-        if not response.success:
-            self.request_queue.append(response)
-        else:
-            print(f"{T.name}: {x}={response.v}")
+        return response
             
-        
     def try_writing(self,T,x,v):
         """Try writing to all live servers. If a WL is available at all servers,
         then we obtain the WLs and write. Otherwise we need to wait in request queue.
@@ -562,7 +495,7 @@ class TransactionManager(Parser):
         Side effects
         ------------
         - If all live sites provide WL, then T obtains the locks and writes to
-          its after image of each available site.
+          its after image of each available site. This resets T.locks_needed
         - If no sites with x are live, then we we'll try later, adding request
           to the request queue
         - If there are available copies, but they're locked, then we wait on
@@ -590,9 +523,8 @@ class TransactionManager(Parser):
             # If no available sites then we just need to give up and try again later
             response = Request(transaction=T,x=x,v=v,
                                operation='W',success=False,callback=lambda time: self.try_writing(T,x,v))
-
             T.blocked_request = response
-            self.request_queue.append(response)
+            return response
         
         else:
             # Otherwise there are available sites -- but we can't get all of the locks
@@ -610,6 +542,85 @@ class TransactionManager(Parser):
                                 operation='W',success=False,callback=lambda time: T.try_again(time))
 
             T.blocked_request = response
-            self.request_queue.append(response)
+            return response
         
+    def abort(self,T,msg):
+        """Abort transaction T at all sites. Aborting involves
+        the following steps.
+            - Ending the transaction at each site.
+            - Removing the transaction from the TransactionManager
+            - Removing any requests from this transaction still in
+              the request queue
+
         
+        Parameters
+        ----------
+        T : Transaction
+            Transaction being aborted
+        msg : str
+            Reason for abort (currently either 'failure' or 'deadlock')
+            
+        Side effects
+        ------------
+        Remove T from all objects managed by either the
+        SiteManagers or the TransactionManager
+
+        See Also
+        --------
+        src.SiteManager.end
+        """
+        # End this transaction at all sites
+        for site_number,site in self.sites.items():
+            site.end(T)
+
+        # Delete this transaction
+        del self.transactions[T.name]
+        
+        # Update the request queue
+        new_q = deque()
+        while self.has_backlogged_requests():
+            next_t = self.request_queue.popleft()
+            if not next_t.transaction == T:
+                new_q.append(next_t)
+        self.request_queue = new_q
+        print(f'Aborting transaction {T.name} due to {msg}')
+
+    def commit(self,T):
+        """Commit a read-write transaction T by
+            - Writing each site's after-image to the corresponding site
+            - Ending the transaction at each site
+            - Removing the transaction from the TransactionManager
+        
+        Parameters
+        ----------
+        T : Transaction
+            Transaction to commit
+            
+        Side effects
+        ------------
+        Remove T from all objects managed by either the
+        SiteManagers or the TransactionManager
+
+        See Also
+        --------
+        src.SiteManager.end
+        """
+        for site in T.after_image:
+            # Write to memory
+            for x,v in T.after_image[site].items():
+                site.write(x,v)
+            # Then commit to disk
+            site.commit(self.time)
+        
+        # Remove T from each site. Note we
+        # need to do this separately from the above
+        # loop, since we need to handle sites where
+        # T only read.
+        for site in self.sites.values():
+            site.end(T)
+        
+        # Delete this transaction
+        del self.transactions[T.name]
+
+        print(f"{T.name} commits")
+    

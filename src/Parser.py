@@ -1,4 +1,5 @@
 import re
+from src.request_response import Request
 from src.Transaction import ReadWriteTransaction,ReadOnlyTransaction
 
 class Parser(object):
@@ -12,17 +13,27 @@ class Parser(object):
 
     def __init__(self):
         self.ALL_COMMANDS = {
-            r'begin\((T[\d]+)\)': self.p_BEGIN,
-            r'beginRO\((T[\d]+)\)': self.p_BEGIN_RO,
-            r'R\((T[\d]+)\s*,\s*(x[\d]+)\s*\)': self.p_READ,
-            r'W\((T[\d]+)\s*,\s*(x[\d]+)\s*,\s*(.+)\s*\)': self.p_WRITE,
-            r'dump\(\)': self.p_DUMP,
-            r'end\((T[\d]+)\)': self.p_END,
-            r'fail\(([\d]+)\)': self.p_FAIL,
-            r'recover\(([\d]+)\)': self.p_RECOVER
+            r'begin\((T[\d]+)\)': self.parse_begin,
+            r'beginRO\((T[\d]+)\)': self.parse_beginRO,
+            r'R\((T[\d]+)\s*,\s*(x[\d]+)\s*\)': self.parse_R,
+            r'W\((T[\d]+)\s*,\s*(x[\d]+)\s*,\s*(.+)\s*\)': self.parse_W,
+            r'dump\(\)': self.parse_dump,
+            r'end\((T[\d]+)\)': self.parse_end,
+            r'fail\(([\d]+)\)': self.parse_fail,
+            r'recover\(([\d]+)\)': self.parse_recover
         }
 
-    def p_BEGIN(self,m):
+    def success_callback(self,time):
+        """Callback for requests which always succeed.
+        """
+        # Create and return dummy request
+        request = Request(transaction=None,x=None,v=None,operation='success',
+                          success=True,callback=lambda time: None)
+
+        return request
+
+
+    def parse_begin(self,m):
         """Parse begin transaction request, by creating a
         new ReadWriteTransaction.
         
@@ -38,7 +49,14 @@ class Parser(object):
         T = m.group(1)
         self.transactions[T] = ReadWriteTransaction(T,self.time)
         
-    def p_BEGIN_RO(self,m):
+        # Create and return dummy request
+        request = Request(transaction=self.transactions[T],
+                          x=None,v=None,operation='begin',
+                          success=True,callback=self.success_callback)
+
+        return request
+        
+    def parse_beginRO(self,m):
         """Parse begin transaction request, by creating a
         new ReadOnlyTransaction.
         
@@ -54,7 +72,14 @@ class Parser(object):
         T = m.group(1)
         self.transactions[T] = ReadOnlyTransaction(T,self.time)
         
-    def p_READ(self,m):
+        # Create and return dummy request
+        request = Request(transaction=self.transactions[T],
+                          x=None,v=None,operation='beginRO',
+                          success=True,callback=self.success_callback)
+
+        return request
+        
+    def parse_R(self,m):
         """ Transaction T tries to read variable x. 
         If T is read-only, then it must read x from
         the site with the most-recent commit to x, that
@@ -71,9 +96,13 @@ class Parser(object):
         """
         T = self.transactions[m.group(1)]
         x = m.group(2)
-        self.try_reading(T,x)
+
+        # Create and return request
+        request = Request(transaction=T,x=x,v=None,operation='R',
+                          success=False,callback=lambda time: self.try_reading(T,x))
+        return request
         
-    def p_WRITE(self,m):
+    def parse_W(self,m):
         """ Transaction T tries to write to variable x. 
         
         Parameters
@@ -88,9 +117,14 @@ class Parser(object):
         T = self.transactions[m.group(1)]
         x = m.group(2)
         v = m.group(3)
-        self.try_writing(T,x,v)
+
+        # Create and return request
+        request = Request(transaction=T,x=x,v=v,operation='W',
+                          success=False,callback=lambda time: self.try_writing(T,x,v))
+
+        return request
         
-    def p_DUMP(self,m):
+    def parse_dump(self,m):
         """ Dump the current values at each site. 
         
         Parameters
@@ -106,7 +140,14 @@ class Parser(object):
                 print_str = print_str + f' {x[0]}: {x[1]},'
             print(print_str[:-1])
         
-    def p_END(self,m):
+        # Create and return dummy request
+        request = Request(transaction=None,
+                          x=None,v=None,operation='dump',
+                          success=True,callback=self.success_callback)
+
+        return request
+        
+    def parse_end(self,m):
         """ End transaction T, either committing or aborting.
         If transaction T is read only, then it always commits.
         Otherwise we validate the commit request. If valid, 
@@ -119,19 +160,34 @@ class Parser(object):
         """
         T = self.transactions[m.group(1)]
         
-        if T.read_only == True:
-            # Then committing is trivial
-            print(f"{T.name} commits")
-            
-        else:
-            # Then we need to check if T can commit
-            if T.can_commit():
-                self.commit(T)
+        def end_callback():
+            if T.read_only == True:
+                # Then committing is trivial
+                print(f"{T.name} commits")
+                # Delete this transaction
+                del self.transactions[T.name]
+                
             else:
-                self.abort(T,'failure')
+                # Then we need to check if T can commit
+                if T.can_commit():
+                    self.commit(T)
+                else:
+                    self.abort(T,'failure')
+
+            return self.success_callback(self.time)
         
-    def p_FAIL(self,m):
-        """ Simulate site S failing.
+        # Create and return dummy request
+        request = Request(transaction=None,
+                          x=None,v=None,operation='end',
+                          success=True,callback=lambda time: end_callback())
+
+        return request
+        
+    def parse_fail(self,m):
+        """ Simulate site S failing. Note this also
+        simulates the TM being alerted that the site has failed,
+        and telling all transactions to drop locks at that site
+        (and stop waiting on locks from the site).
         
         Parameters
         ----------
@@ -142,10 +198,21 @@ class Parser(object):
         --------
         SiteManager.fail
         """
-        S = self.sites[int(m.group(1))]
-        S.fail()
         
-    def p_RECOVER(self,m):
+        def fail_callback():
+            S = self.sites[int(m.group(1))]
+            S.fail()
+            self.have_transactions_drop_locks_at_dead_sites()
+            return self.success_callback(self.time)
+        
+        # Create and return dummy request
+        request = Request(transaction=None,
+                          x=None,v=None,operation='fail',
+                          success=True,callback=lambda time: fail_callback())
+
+        return request
+
+    def parse_recover(self,m):
         """ Simulate site S recovering.
         
         Parameters
@@ -157,10 +224,19 @@ class Parser(object):
         --------
         SiteManager.recover
         """
-        S = self.sites[int(m.group(1))]
-        S.recover(self.time)
+        def recover_callback():
+            S = self.sites[int(m.group(1))]
+            S.recover(self.time)
+            return self.success_callback(self.time)
         
-    def p_line(self,line):
+        # Create and return dummy request
+        request = Request(transaction=None,
+                          x=None,v=None,operation='recover',
+                          success=True,callback=lambda time: recover_callback())
+
+        return request
+
+    def parse_line(self,line):
         """ Parses a line of instruction from the input file/stdin,
         finding the matching pattern and dispatching to the associated
         parsing function.

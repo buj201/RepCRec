@@ -21,7 +21,7 @@ for t in tests:
     # Replace default stdout (terminal) with our stream
     sys.stdout = buff
     
-    TM.main()
+    TM.main(debug=False)
     
     output_lines = [x.strip() for x in buff.getvalue().split('\n') if len(x) > 0]
 

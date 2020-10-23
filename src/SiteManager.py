@@ -38,7 +38,8 @@ class SiteManager(LockTable):
         self.memory = {f'x{i}': Variable(i,replicated=True)
                        for i in range(2,self.N_VARS+2,2)}
         
-        # If site is in 2,4,...,10, also have odd variables x{site_number-1} and x{site_number + 10 - 1}
+        # If site is in 2,4,...,10, then it als has
+        # odd variables x{site_number-1} and x{site_number + 10 - 1}
         if site_number % 2 == 0:
             self.memory.update({
                 f'x{i}': Variable(i,replicated=False)
@@ -95,8 +96,7 @@ class SiteManager(LockTable):
             Current value of x in memory
         """
         return self.memory[x].read()
-        
-            
+                   
     def write(self,x,v):
         """
         Transaction T writes v to x. Note called during commit

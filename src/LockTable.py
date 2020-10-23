@@ -165,7 +165,6 @@ class LockTable(object):
             transactions=waiting_for
         )
         
-        
     def give_transaction_WL(self,T,x):
         """ Gives transaction T a WL on x.
         
@@ -248,9 +247,13 @@ class LockTable(object):
             
             if (next_lock_type == 'RL'):
                 # Check if RL available
-                available, _ = self.RL_available(requesting_T,x)
-                if available:
+                # Case 1: No transaction holds a WL
+                if (self.lock_table[x]['WL'] is None):
                     self.give_transaction_RL(requesting_T,x)
+                # Case 2: requesting_T already has WL
+                elif (self.lock_table[x]['WL'] == requesting_T):
+                    self.give_transaction_RL(requesting_T,x)
+                # Case 3: some other transacion has WL
                 else:
                     gave_new_lock = False
                     # Put this transaction back at front of queue
@@ -258,8 +261,10 @@ class LockTable(object):
                     
             # Requesting WL
             else:
-                available, _ = self.WL_available(requesting_T,x)
-                if available:
+                # Case 1: No other transaction holds a WL and
+                # no other transactions have read locks
+                if ((self.lock_table[x]['WL'] is None) and
+                    (len(self.lock_table[x]['RL'].difference([requesting_T]))==0)):
                     self.give_transaction_WL(requesting_T,x)
                 else:
                     gave_new_lock = False
