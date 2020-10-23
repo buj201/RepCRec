@@ -241,6 +241,9 @@ class ReadWriteTransaction(Transaction):
         None
         """
         for site in dead_sites:
-            self.locks_needed[site] = set()
-            self.write_locks[site] = set()
-            self.read_locks[site] = set()
+            if site in self.locks_needed:
+                self.locks_needed.pop(site)
+            if site in self.write_locks:
+                self.write_locks.pop(site)
+            if site in self.read_locks:
+                self.read_locks.pop(site)

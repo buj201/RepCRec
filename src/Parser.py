@@ -99,7 +99,7 @@ class Parser(object):
 
         # Create and return request
         request = Request(transaction=T,x=x,v=None,operation='R',
-                          success=False,callback=lambda time: self.try_reading(T,x))
+                          success=False,callback=lambda time: self.route_read_request(T,x))
         return request
         
     def parse_W(self,m):
@@ -120,8 +120,8 @@ class Parser(object):
 
         # Create and return request
         request = Request(transaction=T,x=x,v=v,operation='W',
-                          success=False,callback=lambda time: self.try_writing(T,x,v))
-
+                          success=False,callback=lambda time: self.route_write_request(T,x,v))
+        
         return request
         
     def parse_dump(self,m):
@@ -170,9 +170,9 @@ class Parser(object):
             else:
                 # Then we need to check if T can commit
                 if T.can_commit():
-                    self.commit(T)
+                    self.commit_transaction(T)
                 else:
-                    self.abort(T,'failure')
+                    self.abort_transaction(T,'failure')
 
             return self.success_callback(self.time)
         
@@ -202,7 +202,11 @@ class Parser(object):
         def fail_callback():
             S = self.sites[int(m.group(1))]
             S.fail()
-            self.have_transactions_drop_locks_at_dead_sites()
+
+            # Tell transactions to remove the locks they're holding at thise site
+            for T in self.transactions.values():
+                T.drop_locks_at_dead_sites([S])
+                
             return self.success_callback(self.time)
         
         # Create and return dummy request

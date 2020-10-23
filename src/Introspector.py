@@ -79,7 +79,7 @@ def rep_transaction(T):
         if blocked_request is not None:
             next_op = f"{blocked_request.operation}({blocked_request.x}"
             if blocked_request.v is not None:
-                next_op += f"{blocked_request.v}"
+                next_op += f",{blocked_request.v}"
             next_op += ')'
         else:
             next_op = ''
