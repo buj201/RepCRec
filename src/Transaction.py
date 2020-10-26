@@ -1,5 +1,5 @@
 from collections import defaultdict,namedtuple
-from src.request_response import Request
+from src.request_response import RequestResponse
 from copy import deepcopy
 
 class Transaction(object):
@@ -83,8 +83,8 @@ class ReadWriteTransaction(Transaction):
 
         Parameters
         ----------
-        request : Request
-            A "R" or "W" Request.
+        request : RequestResponse
+            A "R" or "W" RequestResponse.
 
         Returns
         -------
@@ -183,19 +183,19 @@ class ReadWriteTransaction(Transaction):
         
         Parameters
         ----------
-        request : Request
-            A "W" Request
+        request : RequestResponse
+            A "W" RequestResponse
         time : int
             Time at which this callback is re-executed, so the
             access time can be stored for successful read/write requests.
             
         Returns
         -------
-        nts.Request
+        nts.RequestResponse
         
         See Also
         --------
-        nts.Request
+        nts.RequestResponse
         """
         v = request.v
         x = request.x
@@ -208,11 +208,11 @@ class ReadWriteTransaction(Transaction):
                 self.write_v_to_site_x(site,x,v,time)
             self.locks_needed = defaultdict(set)
 
-            return Request(transaction=self,x=x,v=v,
+            return RequestResponse(transaction=self,x=x,v=v,
                             operation='W',success=True,
                             callback=None)
         else:
-            return Request(transaction=self,x=x,v=v,
+            return RequestResponse(transaction=self,x=x,v=v,
                            operation='W',success=False,
                            callback=request.callback)
     
@@ -222,19 +222,19 @@ class ReadWriteTransaction(Transaction):
         
         Parameters
         ----------
-        request : Request
-            A "R" Request
+        request : RequestResponse
+            A "R" RequestResponse
         time : int
             Time at which this callback is re-executed, so the
             access time can be stored for successful read requests.
             
         Returns
         -------
-        nts.Request
+        nts.RequestResponse
         
         See Also
         --------
-        nts.Request
+        nts.RequestResponse
         """
         v = request.v
         x = request.x
@@ -243,17 +243,15 @@ class ReadWriteTransaction(Transaction):
         
         # If we have all required locks, proceed
         if has_all_needed_locks:
-            if len(self.locks_needed) != 1:
-                raise ValueError("Should only be waiting on one read lock.")
             for site in self.locks_needed:
                 v = self.read_site_x(site,x,time)
             self.locks_needed = defaultdict(set)
             
-            return Request(transaction=self,x=x,v=v,
+            return RequestResponse(transaction=self,x=x,v=v,
                             operation='R',success=True,
                             callback=None)
         else:
-            return Request(transaction=self,x=x,v=None,
+            return RequestResponse(transaction=self,x=x,v=None,
                             operation='R',success=False,
                             callback=request.callback)
 

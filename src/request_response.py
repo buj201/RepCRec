@@ -1,4 +1,4 @@
-class Request(object):
+class RequestResponse(object):
     def __init__(self,transaction,x,v,operation,success,callback):
         self.transaction = transaction
         self.x = x

@@ -1,5 +1,5 @@
 import re
-from src.request_response import Request
+from src.request_response import RequestResponse
 from src.Transaction import ReadWriteTransaction,ReadOnlyTransaction
 
 class Parser(object):
@@ -27,7 +27,7 @@ class Parser(object):
         """Callback for requests which always succeed.
         """
         # Create and return dummy request
-        request = Request(transaction=None,x=None,v=None,operation='success',
+        request = RequestResponse(transaction=None,x=None,v=None,operation='success',
                           success=True,callback=lambda request,time: None)
 
         return request
@@ -49,7 +49,7 @@ class Parser(object):
         self.transactions[T] = ReadWriteTransaction(T,self.time)
         
         # Create and return dummy request
-        request = Request(transaction=self.transactions[T],
+        request = RequestResponse(transaction=self.transactions[T],
                           x=None,v=None,operation='begin',
                           success=True,callback=self.success_callback)
 
@@ -72,7 +72,7 @@ class Parser(object):
         self.transactions[T] = ReadOnlyTransaction(T,self.time)
         
         # Create and return dummy request
-        request = Request(transaction=self.transactions[T],
+        request = RequestResponse(transaction=self.transactions[T],
                           x=None,v=None,operation='beginRO',
                           success=True,callback=self.success_callback)
 
@@ -97,10 +97,10 @@ class Parser(object):
         x = m.group(2)
 
         if T.read_only:
-            request = Request(transaction=T,x=x,v=None,operation='R',
+            request = RequestResponse(transaction=T,x=x,v=None,operation='R',
                             success=False,callback=self.manage_read_only_read_request)
         else:
-            request = Request(transaction=T,x=x,v=None,operation='R',
+            request = RequestResponse(transaction=T,x=x,v=None,operation='R',
                             success=False,callback=self.manage_read_write_read_request)
         return request
         
@@ -121,7 +121,7 @@ class Parser(object):
         v = m.group(3)
 
         # Create and return request
-        request = Request(transaction=T,x=x,v=v,operation='W',
+        request = RequestResponse(transaction=T,x=x,v=v,operation='W',
                           success=False,callback=self.manage_write_request)
         
         return request
@@ -143,7 +143,7 @@ class Parser(object):
             print(print_str[:-1])
         
         # Create and return dummy request
-        request = Request(transaction=None,
+        request = RequestResponse(transaction=None,
                           x=None,v=None,operation='dump',
                           success=True,callback=self.success_callback)
 
@@ -179,7 +179,7 @@ class Parser(object):
             return self.success_callback(request,self.time)
         
         # Create and return dummy request
-        request = Request(transaction=None,
+        request = RequestResponse(transaction=None,
                           x=None,v=None,operation='end',
                           success=True,callback=end_callback)
 
@@ -212,7 +212,7 @@ class Parser(object):
             return self.success_callback(request,self.time)
         
         # Create and return dummy request
-        request = Request(transaction=None,
+        request = RequestResponse(transaction=None,
                           x=None,v=None,operation='fail',
                           success=True,callback=fail_callback)
 
@@ -236,7 +236,7 @@ class Parser(object):
             return self.success_callback(request,self.time)
         
         # Create and return dummy request
-        request = Request(transaction=None,
+        request = RequestResponse(transaction=None,
                           x=None,v=None,operation='recover',
                           success=True,callback=recover_callback)
 

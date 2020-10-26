@@ -7,14 +7,14 @@ import random
 from src.SiteManager import SiteManager
 from src.Parser import Parser
 from src.Transaction import ReadWriteTransaction,ReadOnlyTransaction
-from src.request_response import Request
+from src.request_response import RequestResponse
 
 class TransactionManager(Parser):
     """
-    The transaction manager is responsible for translates read and write
+    The transaction manager is responsible for translating read and write
     requests on variables to read and write re-quests on copies using
     the available copy algorithm. It both parses and routes incoming
-    requests, and manages a queue of blocked requests.
+    requests, and manages a queue of requests.
     
     Attributes
     ----------
@@ -27,7 +27,7 @@ class TransactionManager(Parser):
     instructions : fileinput input
         Input file, or stdin, from which instructions are read
     request_queue : deque
-        A queue storing Requests, with callbacks to execute for operations
+        A queue storing RequestResponses, with callbacks to execute for operations
         that were blocked by lock conflicts or failures
     """
     N_SITES = 10
@@ -41,7 +41,7 @@ class TransactionManager(Parser):
         self.request_queue = deque()
     
     def main(self,debug=False):
-        """Main function that reads entire input command.
+        """Main function that reads entire set of input commands.
         """
         done = False
         while not done:
@@ -50,8 +50,8 @@ class TransactionManager(Parser):
     def tick(self,debug=False):
         """Advance time by one step. When we advance time, we:
             1. Detect deadlocks, and abort the youngest transaction in the cycle.
-            2. Attempt to execute callbacks in queue
-            3. Attempt to execute next instruction
+            2. Reads next instruction and adds corresponding RequestResponse to end of queue.
+            3. Attempt to execute RequestReponses in queue
 
         Parameters
         ----------
@@ -85,9 +85,9 @@ class TransactionManager(Parser):
 
     def sweep_request_queue(self):
         """Sweep through request queue in order, calling callbacks. 
-        Note the request queue is a queue of blocked operations,
+        Note the request queue includes blocked operations,
         where the requested operation is blocked due to either lock
-        conflicts or due to failure.
+        conflicts or due to failure, as well as the next new instruction.
         """
         new_queue = deque()
     
@@ -108,7 +108,13 @@ class TransactionManager(Parser):
         self.request_queue = new_queue
        
     def has_backlogged_requests(self):
-        """Has backlogged requests
+        """Check if the TransactionManager still needs to try working
+        through backlogged requests.
+
+        Returns
+        -------
+        bool
+            True if the request queue is not empty.
         """
         return len(self.request_queue)>0
 
@@ -122,7 +128,7 @@ class TransactionManager(Parser):
 
         Returns
         -------
-        Request
+        RequestResponse
             Next request. If None, then simulation is over.
         """
         try:
@@ -206,7 +212,7 @@ class TransactionManager(Parser):
         return composed
 
     def manage_write_request(self,request,time):
-        """Manage a write request. Updates the lock requests for the requesting
+        """Manage a write request. Updates lock requests for the requesting
         transaction (i.e. to ensure that locks have been requested at all
         available copies). If there are available copies, have the site
         write if it is holding all required locks; if it isn't holding
@@ -215,16 +221,16 @@ class TransactionManager(Parser):
 
         Parameters
         ----------
-        request : Request
-            A "W" Request.
+        request : RequestResponse
+            A "W" RequestResponse.
         time : int
             Time at which this callback is re-executed, so the
             access time can be stored for successful read/write requests.
 
         Returns
         -------
-        Request
-            A new Request object.
+        RequestResponse
+            A new RequestResponse object.
 
         Side effects
         ------------
@@ -239,7 +245,7 @@ class TransactionManager(Parser):
         # Step 2(a): If no available sites (i.e. not waiting on any locks)
         # then wait till next tick
         if not request.transaction.is_waiting_on_locks():
-            response = Request(transaction=T,x=x,v=v,
+            response = RequestResponse(transaction=T,x=x,v=v,
                                operation='W',success=False,
                                callback=self.manage_write_request)
 
@@ -256,7 +262,7 @@ class TransactionManager(Parser):
 
         Parameters
         ----------
-        next_request : Request, for a "W" operation
+        next_request : RequestResponse, for a "W" operation
 
         Returns
         -------
@@ -284,35 +290,31 @@ class TransactionManager(Parser):
                         site.add_transaction_to_lock_queue(T,x,waiting_for,'WL')
       
     def manage_read_write_read_request(self,request,time):
-        """Manage a read request. If the requesting transaction is read only,
-        then we simply route the request. If it's read-write, check if the
-        transaction is waiting on a lock.
+        """Manage a read request from a read-write transaction. Check
+        if the transaction is waiting on a lock. If so, then read
+        if its holding the lock. If it is not waiting on a lock,
+        then it needs to be re-routed.
 
         Parameters
         ----------
-        request : Request
-            A "R" Request.
+        request : RequestResponse
+            A "R" RequestResponse.
         time : int
             Time at which this callback is re-executed, so the
             access time can be stored for successful read/write requests.
 
         Returns
         -------
-        Request
-            A new Request object.
+        RequestResponse
+            A new RequestResponse object.
         """
-        # Handle read only transactions
-        if request.transaction.read_only:
-            response = next_request.callback(request,self.time)
-            return response
+        # Read-write transaction
+        if not request.transaction.is_waiting_on_locks():
+            # Then need to re-route to a live site
+            response = self.route_read_write_read(request,time)
         else:
-            # Read-write transaction
-            if not request.transaction.is_waiting_on_locks():
-                # Then need to re-route to a live site
-                response = self.route_read_write_read(request,time)
-            else:
-                # Waiting on a lock at a live site.
-                response = request.transaction.read_if_holding_all_required_locks(request,self.time)
+            # Waiting on a lock at a live site.
+            response = request.transaction.read_if_holding_all_required_locks(request,self.time)
 
         return response
 
@@ -328,19 +330,19 @@ class TransactionManager(Parser):
         
         Parameters
         ----------
-        request : Request
-            A "R" Request from a read-only transaction.
+        request : RequestResponse
+            A "R" RequestResponse from a read-only transaction.
         time : int
             Time at which this callback is re-executed, so the
             access time can be stored for successful read/write requests.
             
         Returns
         -------
-        nts.Request
+        nts.RequestResponse
         
         See Also
         --------
-        nts.Request
+        nts.RequestResponse
         """
         T = request.transaction
         x = request.x
@@ -358,11 +360,11 @@ class TransactionManager(Parser):
         if most_recent_value is not None:
             # Then found an alive server, with an available committed copy of x,
             # where the commit time is before the transaction start time
-            response = Request(transaction=T,x=x,v=most_recent_value,
+            response = RequestResponse(transaction=T,x=x,v=most_recent_value,
                                 operation='R',success=True,callback=None)
         else:
             # Didn't find such a server -- so need to try to find one at next tick
-            response = Request(transaction=T,x=x,v=None,
+            response = RequestResponse(transaction=T,x=x,v=None,
                                 operation='R',success=False,
                                 callback=self.route_read_only_read)
         return response
@@ -378,23 +380,23 @@ class TransactionManager(Parser):
         If no servers satisfy these conditions, then we find a server:
             - Server is alive
             - Variable is available (e.g. not unavailable due to failure)
-            - Request lock on x and wait
+            - RequestResponse lock on x and wait
             
         Parameters
         ----------
-        request : Request
-            A "R" Request.
+        request : RequestResponse
+            A "R" RequestResponse.
         time : int
             Time at which this callback is re-executed, so the
             access time can be stored for successful read/write requests.
             
         Returns
         -------
-        nts.Request
+        nts.RequestResponse
         
         See Also
         --------
-        nts.Request
+        nts.RequestResponse
         """
 
         T = request.transaction
@@ -413,7 +415,7 @@ class TransactionManager(Parser):
                     RL = site.give_transaction_RL(T,x)
                     # ... and read the value
                     v = T.read_site_x(site,x,self.time)
-                    return Request(transaction=T,x=x,v=v,
+                    return RequestResponse(transaction=T,x=x,v=v,
                                    operation='R',success=True,
                                    callback=None)
                 else:
@@ -428,11 +430,9 @@ class TransactionManager(Parser):
             waiting_for = site.RL_available(T,x).transactions
             site.add_transaction_to_lock_queue(T,x,waiting_for,'RL')
                     
-        response = Request(transaction=T,x=x,v=None,
+        return RequestResponse(transaction=T,x=x,v=None,
                             operation='R',success=False,
                             callback=self.manage_read_write_read_request)
-        
-        return response 
             
     def abort_transaction(self,T,msg):
         """Abort transaction T at all sites. Aborting involves
