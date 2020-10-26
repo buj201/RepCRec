@@ -94,9 +94,9 @@ class TransactionManager(Parser):
         while self.has_backlogged_requests():
 
             next_request = self.request_queue.popleft()
-            # Try execution
 
-            response = self.execute_next_request(next_request)
+            # Execute callback
+            response = next_request.callback(next_request,self.time)
             if not response.success:
                 # Push response onto new queue
                 new_queue.append(response)
@@ -111,68 +111,6 @@ class TransactionManager(Parser):
         """Has backlogged requests
         """
         return len(self.request_queue)>0
- 
-    def execute_next_request(self,next_request):
-        """Execute the next blocked request.
-
-        Parameters
-        ----------
-        next_request : Request
-            A Request object, with a Transaction.try_again callback, from
-            the request queue.
-
-        Returns
-        -------
-        Request
-            A new Request object. If the Transaction is waiting on locks,
-            then it calls it's try_again callback. If it isn't waiting on any locks,
-            then it gives up and goes back to the TM to be rerouted.
-
-        Side effects
-        ------------
-        - If the operation is a write, check that the operation is waiting
-          for the write lock at all live sites with the variable. If not,
-          request locks as needed so the write operation will write to all
-          available copies.
-        """
-        # If the request is for a non-read/write operation, then we call and
-        # return response
-
-        if next_request.operation in ['begin','beginRO','dump','end',
-                                      'fail','recover','success']:
-            response = next_request.callback(self.time)
-            return response
-        else:
-            if next_request.operation not in ['R','W']:
-                raise ValueError('Invalid operation.')
-
-        # If the operation is read-only, then the callback is either end or read.
-        # Don't worry about locks, etc.
-        if next_request.transaction.read_only:
-            response = next_request.callback(self.time)
-            return response
-        else:
-            # If lock blocked, we call the try_again callback after refreshing locks (for writes)
-            if next_request.transaction.is_waiting_on_locks():
-                # If the operation is a write, refresh the write lock requests
-                if next_request.operation == 'W':
-                    self.refresh_transactions_write_lock_requests(next_request)
-                response = next_request.callback(self.time)
-            else:
-                # Otherwise, TM needs to try rerouting the request to live sites.
-                if next_request.operation == 'W':
-                    new_callback = lambda time: self.route_write_request(next_request.transaction,
-                                                                         next_request.x,next_request.v)
-                elif next_request.operation == 'R':
-                    new_callback = lambda time: self.route_read_write_read(next_request.transaction,
-                                                                           next_request.x)
-                else:
-                    raise ValueError('Invalid operation')
-                # Call new callback function to get a new Request
-                response = new_callback(self.time)
-
-
-            return response
 
     def get_next_new_request(self,debug):
         """Get next request
@@ -267,6 +205,51 @@ class TransactionManager(Parser):
         )
         return composed
 
+    def manage_write_request(self,request,time):
+        """Manage a write request. Updates the lock requests for the requesting
+        transaction (i.e. to ensure that locks have been requested at all
+        available copies). If there are available copies, have the site
+        write if it is holding all required locks; if it isn't holding
+        all required locks, then it waits. If there are no available copies,
+        transaction needs to wait until there are available copies.
+
+        Parameters
+        ----------
+        request : Request
+            A "W" Request.
+        time : int
+            Time at which this callback is re-executed, so the
+            access time can be stored for successful read/write requests.
+
+        Returns
+        -------
+        Request
+            A new Request object.
+
+        Side effects
+        ------------
+        - If the operation is a write, check that the operation is waiting
+          for the write lock at all live sites with the variable. If not,
+          request locks as needed so the write operation will write to all
+          available copies.
+        """
+        # Step 1: Update the lock requests
+        self.refresh_transactions_write_lock_requests(request)
+
+        # Step 2(a): If no available sites (i.e. not waiting on any locks)
+        # then wait till next tick
+        if not request.transaction.is_waiting_on_locks():
+            response = Request(transaction=T,x=x,v=v,
+                               operation='W',success=False,
+                               callback=self.manage_write_request)
+
+        # Step 2(b): If waiting on available sites (i.e. waiting on locks)
+        # then write if holding all locks
+        else:
+            response = request.transaction.write_if_holding_all_required_locks(request,self.time)
+         
+        return response
+
     def refresh_transactions_write_lock_requests(self,next_request):
         """Check if the write transaction has lock requests in at all
         available sites. If not, request missing locks.
@@ -299,8 +282,41 @@ class TransactionManager(Parser):
                         site.give_transaction_WL(T,x)
                     else:
                         site.add_transaction_to_lock_queue(T,x,waiting_for,'WL')
-     
-    def route_read_only_read(self,T,x):
+      
+    def manage_read_write_read_request(self,request,time):
+        """Manage a read request. If the requesting transaction is read only,
+        then we simply route the request. If it's read-write, check if the
+        transaction is waiting on a lock.
+
+        Parameters
+        ----------
+        request : Request
+            A "R" Request.
+        time : int
+            Time at which this callback is re-executed, so the
+            access time can be stored for successful read/write requests.
+
+        Returns
+        -------
+        Request
+            A new Request object.
+        """
+        # Handle read only transactions
+        if request.transaction.read_only:
+            response = next_request.callback(request,self.time)
+            return response
+        else:
+            # Read-write transaction
+            if not request.transaction.is_waiting_on_locks():
+                # Then need to re-route to a live site
+                response = self.route_read_write_read(request,time)
+            else:
+                # Waiting on a lock at a live site.
+                response = request.transaction.read_if_holding_all_required_locks(request,self.time)
+
+        return response
+
+    def manage_read_only_read_request(self,request,time):
         """ Route a read-only read request from transaction T for variable x.
         To route a read-only read request, we need to find the server satisfying:
             - Server is alive
@@ -312,10 +328,11 @@ class TransactionManager(Parser):
         
         Parameters
         ----------
-        T : ReadOnlyTransaction
-            Read-only transaction requesting a read on x
-        x : Variable name
-            Variable to read
+        request : Request
+            A "R" Request from a read-only transaction.
+        time : int
+            Time at which this callback is re-executed, so the
+            access time can be stored for successful read/write requests.
             
         Returns
         -------
@@ -325,6 +342,9 @@ class TransactionManager(Parser):
         --------
         nts.Request
         """
+        T = request.transaction
+        x = request.x
+
         most_recent_commit_time = -1
         most_recent_value = None
         for site_number,site in self.sites.items():
@@ -339,15 +359,15 @@ class TransactionManager(Parser):
             # Then found an alive server, with an available committed copy of x,
             # where the commit time is before the transaction start time
             response = Request(transaction=T,x=x,v=most_recent_value,
-                                operation='R',success=True,callback=None,)
+                                operation='R',success=True,callback=None)
         else:
             # Didn't find such a server -- so need to try to find one at next tick
             response = Request(transaction=T,x=x,v=None,
                                 operation='R',success=False,
-                                callback=lambda time: self.route_read_only_read(T,x))
+                                callback=self.route_read_only_read)
         return response
         
-    def route_read_write_read(self,T,x):
+    def route_read_write_read(self,request,time):
         """Route a read-write read request from transaction T for variable x.
         
         Need to find the server satisfying:
@@ -362,10 +382,11 @@ class TransactionManager(Parser):
             
         Parameters
         ----------
-        T : ReadWriteTransaction
-            ReadWriteTransaction requesting read on x
-        x : Variable name
-            Name of variable to read
+        request : Request
+            A "R" Request.
+        time : int
+            Time at which this callback is re-executed, so the
+            access time can be stored for successful read/write requests.
             
         Returns
         -------
@@ -375,22 +396,28 @@ class TransactionManager(Parser):
         --------
         nts.Request
         """
+
+        T = request.transaction
+        x = request.x
+
         # We'll store a list of locked, live sites containing x in case
         # we need to route read to one of these sites
         live_locked_sites = []
         
         for site_number,site in self.sites.items():
-            # Ignore sites that don't contain x or are down
+            # Ignore sites that don't contain x, are down, or have
+            # recovered without a write to x
             if (site.alive) and (x in site.memory) and (site.memory[x].available):
                 if site.RL_available(T,x).response:
                     # Then lock is available so T can get the lock ...
                     RL = site.give_transaction_RL(T,x)
                     # ... and read the value
-                    v = T.read(site,x,self.time)
+                    v = T.read_site_x(site,x,self.time)
                     return Request(transaction=T,x=x,v=v,
-                                    operation='R',success=True,callback=None)
+                                   operation='R',success=True,
+                                   callback=None)
                 else:
-                    # Then it's locked -- but we still could just wait for the lock
+                    # Then it's locked -- so we could wait for the lock at this site
                     live_locked_sites.append((site_number,site))
         
         # If no live site had x unlocked and available, then we need to route to a locked site.
@@ -401,119 +428,12 @@ class TransactionManager(Parser):
             waiting_for = site.RL_available(T,x).transactions
             site.add_transaction_to_lock_queue(T,x,waiting_for,'RL')
                     
-            # The callback is then T.try_again -- T just needs to waits
-            # to get this read lock at this site
-            response = Request(transaction=T,x=x,v=None,
-                            operation='R',success=False,callback=T.try_again)
+        response = Request(transaction=T,x=x,v=None,
+                            operation='R',success=False,
+                            callback=self.manage_read_write_read_request)
         
-        else:
-            # If there are no live sites with x available, then we need to give up and
-            # retry later
-            response = Request(transaction=T,x=x,v=None,
-                            operation='R',success=False,callback=lambda time: self.route_read_write_read(T,x))
-
-        T.blocked_request = response
         return response 
-        
-    def route_read_request(self,T,x):
-        """Dispatch read request based on whether T is a
-        ReadOnlyTransaction or a ReadWriteTransaction.
             
-        Parameters
-        ----------
-        T : Transaction
-            Transaction requesting read on x
-        x : Variable name
-            Name of variable to read
-            
-        Returns
-        -------
-        Response
-            Returns Response object.
-            Note also prints read response message to stdout if successful
-            
-        See Also
-        --------
-        route_read_write_read and route_read_only_read
-        """
-        # Route read request based on transaction type
-        if T.read_only:
-            response = self.route_read_only_read(T,x)
-        else:
-            response = self.route_read_write_read(T,x)
-        return response
-            
-    def route_write_request(self,T,x,v):
-        """Try writing to all live servers. If a WL is available at all servers,
-        then we obtain the WLs and write. Otherwise we need to wait in request queue.
-        Then there are two reasons why we wait -- either we've requested locks at all live sites,
-        and are waiting for those locks -- or all sites with x were down.
-        
-        Parameters
-        ----------
-        T: ReadWriteTransaction
-            Transaction requesting write on x
-        x : Variable name
-            Name of variable to read
-        v : Any
-            Value to write to x
-            
-        Returns
-        ----------
-        nts.Request
-            
-        Side effects
-        ------------
-        - If all live sites provide WL, then T obtains the locks and writes to
-          its after image of each available site. This resets T.locks_needed
-        - If no sites with x are live, then we we'll try later, adding request
-          to the request queue
-        - If there are available copies, but they're locked, then we wait on
-          those locks and a try again request to the request queue.
-        """
-        at_least_one_available_site = False
-        all_write_locks_available = True
-        for site_number,site in self.sites.items():
-            # Ignore sites that don't contain x or are down
-            if (site.alive) and (x in site.memory):
-                at_least_one_available_site = True
-                if not site.WL_available(T,x).response:
-                    all_write_locks_available = False
-                    
-        # If all write locks are available, then we obtain locks and write
-        if all_write_locks_available and at_least_one_available_site:
-            for site_number,site in self.sites.items():
-                # Ignore sites that don't contain x or are down
-                if (site.alive) and (x in site.memory):
-                    WL = site.give_transaction_WL(T,x)
-                    T.write(site,x,v,self.time)
-            return Request(transaction=T,x=x,v=v,
-                           operation='W',success=True,callback=None)
-        elif not at_least_one_available_site:
-            # If no available sites then we just need to give up and try again later
-            response = Request(transaction=T,x=x,v=v,
-                               operation='W',success=False,callback=lambda time: self.route_write_request(T,x,v))
-            T.blocked_request = response
-            return response
-        
-        else:
-            # Otherwise there are available sites -- but we can't get all of the locks
-            # so we simply add the lock request to the queue at each live site
-                                
-            for site_number,site in self.sites.items():
-                # Ignore sites that don't contain x or are down
-                if (site.alive) and (x in site.memory):
-                    waiting_for = site.WL_available(T,x).transactions
-                    site.add_transaction_to_lock_queue(T,x,waiting_for,'WL')
-        
-            # The callback is then T.try_again -- T just needs to waits
-            # to be given all the requested locks
-            response = Request(transaction=T,x=x,v=v,
-                                operation='W',success=False,callback=lambda time: T.try_again(time))
-
-            T.blocked_request = response
-            return response
-        
     def abort_transaction(self,T,msg):
         """Abort transaction T at all sites. Aborting involves
         the following steps.

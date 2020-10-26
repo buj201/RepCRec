@@ -64,7 +64,7 @@ class LockTable(object):
         """
         holding_write_lock = self.lock_table[x]['WL']
         waiting_for_write_lock = set(other.transaction for other in self.lock_table[x]['waiting']
-                                     if other.lock_type == 'WL')
+                                     if other.lock_type == 'WL').difference([T])
         
         # Case 1 -- another transaction is currently holding a write lock
         if (holding_write_lock is not None) and (holding_write_lock != T):
@@ -75,10 +75,10 @@ class LockTable(object):
         
         # Case 2 -- no other transaction is currently holding a write lock,
         # but some other transaction is waiting for a write lock
-        elif (holding_write_lock is None) and (len(waiting_for_write_lock.difference([T])) > 0):
+        elif (holding_write_lock is None) and (len(waiting_for_write_lock) > 0):
             return LockTableResponse(
                 response=False,
-                transactions=set([holding_write_lock]).union(waiting_for_write_lock)
+                transactions=waiting_for_write_lock
             )
         
         # Case 3: all other cases, T can have lock
@@ -119,7 +119,7 @@ class LockTable(object):
                 Empty if lock is available.
         """
         
-        waiting_for_lock = set(other.transaction for other in self.lock_table[x]['waiting'])
+        waiting_for_lock = set(other.transaction for other in self.lock_table[x]['waiting']).difference([T])
         
         # Case 1 -- T already has WL
         if (self.lock_table[x]['WL'] == T):
@@ -156,9 +156,8 @@ class LockTable(object):
             waiting_for = waiting_for.union(other_transactions_w_RLs)
             
         # Waits for any other transactions waiting for a lock
-        other_transactions_waiting = waiting_for_lock.difference([T])
-        if other_transactions_waiting is not None:
-            waiting_for = waiting_for.union(other_transactions_waiting)
+        if waiting_for_lock is not None:
+            waiting_for = waiting_for.union(waiting_for_lock)
             
         return LockTableResponse(
             response=False,
@@ -261,11 +260,15 @@ class LockTable(object):
                     
             # Requesting WL
             else:
-                # Case 1: No other transaction holds a WL and
+                # Case 1: Already holds a WL:
+                if (self.lock_table[x]['WL'] == requesting_T):
+                    self.give_transaction_WL(requesting_T,x)
+                # Case 2: No other transaction holds a WL and
                 # no other transactions have read locks
-                if ((self.lock_table[x]['WL'] is None) and
+                elif ((self.lock_table[x]['WL'] is None) and
                     (len(self.lock_table[x]['RL'].difference([requesting_T]))==0)):
                     self.give_transaction_WL(requesting_T,x)
+                # Case 3: All other cases can't give lock
                 else:
                     gave_new_lock = False
                     # Put this transaction back at front of queue

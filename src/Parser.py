@@ -23,15 +23,14 @@ class Parser(object):
             r'recover\(([\d]+)\)': self.parse_recover
         }
 
-    def success_callback(self,time):
+    def success_callback(self,request,time):
         """Callback for requests which always succeed.
         """
         # Create and return dummy request
         request = Request(transaction=None,x=None,v=None,operation='success',
-                          success=True,callback=lambda time: None)
+                          success=True,callback=lambda request,time: None)
 
         return request
-
 
     def parse_begin(self,m):
         """Parse begin transaction request, by creating a
@@ -97,9 +96,12 @@ class Parser(object):
         T = self.transactions[m.group(1)]
         x = m.group(2)
 
-        # Create and return request
-        request = Request(transaction=T,x=x,v=None,operation='R',
-                          success=False,callback=lambda time: self.route_read_request(T,x))
+        if T.read_only:
+            request = Request(transaction=T,x=x,v=None,operation='R',
+                            success=False,callback=self.manage_read_only_read_request)
+        else:
+            request = Request(transaction=T,x=x,v=None,operation='R',
+                            success=False,callback=self.manage_read_write_read_request)
         return request
         
     def parse_W(self,m):
@@ -120,7 +122,7 @@ class Parser(object):
 
         # Create and return request
         request = Request(transaction=T,x=x,v=v,operation='W',
-                          success=False,callback=lambda time: self.route_write_request(T,x,v))
+                          success=False,callback=self.manage_write_request)
         
         return request
         
@@ -160,7 +162,7 @@ class Parser(object):
         """
         T = self.transactions[m.group(1)]
         
-        def end_callback():
+        def end_callback(request,time):
             if T.read_only == True:
                 # Then committing is trivial
                 print(f"{T.name} commits")
@@ -174,12 +176,12 @@ class Parser(object):
                 else:
                     self.abort_transaction(T,'failure')
 
-            return self.success_callback(self.time)
+            return self.success_callback(request,self.time)
         
         # Create and return dummy request
         request = Request(transaction=None,
                           x=None,v=None,operation='end',
-                          success=True,callback=lambda time: end_callback())
+                          success=True,callback=end_callback)
 
         return request
         
@@ -199,7 +201,7 @@ class Parser(object):
         SiteManager.fail
         """
         
-        def fail_callback():
+        def fail_callback(request,time):
             S = self.sites[int(m.group(1))]
             S.fail()
 
@@ -207,12 +209,12 @@ class Parser(object):
             for T in self.transactions.values():
                 T.drop_locks_at_dead_sites([S])
                 
-            return self.success_callback(self.time)
+            return self.success_callback(request,self.time)
         
         # Create and return dummy request
         request = Request(transaction=None,
                           x=None,v=None,operation='fail',
-                          success=True,callback=lambda time: fail_callback())
+                          success=True,callback=fail_callback)
 
         return request
 
@@ -228,15 +230,15 @@ class Parser(object):
         --------
         SiteManager.recover
         """
-        def recover_callback():
+        def recover_callback(request,time):
             S = self.sites[int(m.group(1))]
             S.recover(self.time)
-            return self.success_callback(self.time)
+            return self.success_callback(request,self.time)
         
         # Create and return dummy request
         request = Request(transaction=None,
                           x=None,v=None,operation='recover',
-                          success=True,callback=lambda time: recover_callback())
+                          success=True,callback=recover_callback)
 
         return request
 

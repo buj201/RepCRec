@@ -75,18 +75,10 @@ def rep_transaction(T):
     else:
         read_locks = {k.site_number: v for k,v in TM.transactions[T].read_locks.items() if len(v)>0}
         write_locks = {k.site_number: v for k,v in TM.transactions[T].write_locks.items() if len(v)>0}
-        blocked_request = TM.transactions[T].blocked_request
-        if blocked_request is not None:
-            next_op = f"{blocked_request.operation}({blocked_request.x}"
-            if blocked_request.v is not None:
-                next_op += f",{blocked_request.v}"
-            next_op += ')'
-        else:
-            next_op = ''
         locks_needed = {k.site_number: v for k,v in TM.transactions[T].locks_needed.items() if len(v)>0}
         m = dcc.Markdown(f"#### Transaction {T}:\n* Start Time = {start_time}\n* Read-only = {read_only}" +\
                          f"\n* Read locks = {read_locks}\n* Write locks = {write_locks}"+\
-                         f"\n* Next operation (if blocked by lock conflicts) = {next_op}\n* Locks needed = {locks_needed}",
+                         f"\n* Locks needed = {locks_needed}",
                          style={'padding-bottom':25})
         
         after_image = pd.DataFrame({f"Site {k.site_number}": v for k,v in TM.transactions[T].after_image.items()}).T
