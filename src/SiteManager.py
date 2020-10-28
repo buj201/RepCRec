@@ -55,10 +55,13 @@ class SiteManager(LockTable):
         
         
     def read_from_disk(self,T,x):
-        """ Transaction T reads x from disk, by reading the most recent
-        snapshot committed before T began. Note our implementation
-        allows commits of non-available variables -- so we need
-        to check we read x from a snapshot where it is available.
+        """ Transaction T reads x from disk. T can only read x
+        at this site if:
+            - T reads from a commit that occurred before T started
+            - x is available in this commit (i.e. this site hadn't
+              recovered from failure prior to this commit, with x
+              not in the write set of the commmitting transaction)
+            - The site has been live since this commit.
         
         Parameters
         ----------
@@ -74,11 +77,17 @@ class SiteManager(LockTable):
         """
         
         # Get most recent snapshot on disk by traversing in reversed
-        # order, breaking out when we first find a commit from before the
-        # transaction T started where x is available
+        # order, breaking out if we find the most recently committed
+        # copy of x at this site
         for snapshot in reversed(self.disk):
-            if ((T.start_time > snapshot.time) and (snapshot.snapshot[x].available)):
+            if ((T.start_time > snapshot.time) and 
+                (snapshot.snapshot[x].available) and 
+                (snapshot.time >= self.uptime)):
                 return snapshot.time, snapshot.snapshot[x].read()
+        
+        # Otherwise the most recent value of x is not available at this
+        # site
+        return None, None
         
     def read_from_memory(self,x):
         """ Transaction T reads x from memory
