@@ -3,6 +3,8 @@ from collections import namedtuple,deque
 import re
 import networkx as nx
 import random
+import argparse
+import sys
 
 from src.SiteManager import SiteManager
 from src.Parser import Parser
@@ -32,14 +34,41 @@ class TransactionManager(Parser):
     """
     N_SITES = 10
     
-    def __init__(self,test):
+    def __init__(self,instructions='-'):
+        """Initializes the TransactionManager for the input
+        transactions specified by `instructions`.
+
+        Parameters
+        ----------
+        instructions : Input instructions
+            List of files to parse as instructions. By default '-'
+            (i.e. sys.stdin).
+        """
         super().__init__()
         self.time = 0
         self.sites = {i:SiteManager(i,self.time) for i in range(1,self.N_SITES+1)}
         self.transactions = {}
-        self.instructions = fileinput.input(test)
+        self.instructions = instructions
         self.request_queue = deque()
     
+    def live_sites_with_x(self,x):
+        """Get list of live sites with x.
+
+        Parameters
+        ----------
+        x : Variable name
+
+        Returns
+        -------
+        List of SiteManagers
+            List of live sites with x
+        """
+        live_w_x = []
+        for site_number, site in self.sites.items():
+            if (site.alive) and (x in site.memory):
+                live_w_x.append(site)
+        return live_w_x
+
     def main(self,debug=False):
         """Main function that reads entire set of input commands.
         """
@@ -245,9 +274,7 @@ class TransactionManager(Parser):
         # Step 2(a): If no available sites (i.e. not waiting on any locks)
         # then wait till next tick
         if not request.transaction.is_waiting_on_locks():
-            response = RequestResponse(transaction=T,x=x,v=v,
-                                       operation='W',success=False,
-                                       callback=self.manage_write_request)
+            return request
 
         # Step 2(b): If waiting on available sites (i.e. waiting on locks)
         # then write if holding all locks
@@ -256,13 +283,13 @@ class TransactionManager(Parser):
          
         return response
 
-    def refresh_transactions_write_lock_requests(self,next_request):
+    def refresh_transactions_write_lock_requests(self,request):
         """Check if the write transaction has lock requests in at all
         available sites. If not, request missing locks.
 
         Parameters
         ----------
-        next_request : RequestResponse, for a "W" operation
+        request : RequestResponse, for a "W" operation
 
         Returns
         -------
@@ -274,20 +301,10 @@ class TransactionManager(Parser):
         the write lock, at each site which is (i) alive, and (ii) the
         transaction is not holding or waiting for a lock.
         """
-        T = next_request.transaction
-        x = next_request.x
-        for site_number, site in self.sites.items():
-            if (site.alive) and (x in site.memory):
-                # Check that the transaction knows it needs the lock on site.x
-                if x not in T.locks_needed[site]:
-                    # If not, then we need to try to give T the lock, or
-                    # add it to the queue, and update T's lock_needed dict
-                    T.locks_needed[site].add(x)
-                    lock_available, waiting_for = site.WL_available(T,x)
-                    if lock_available:
-                        site.give_transaction_WL(T,x)
-                    else:
-                        site.add_transaction_to_lock_queue(T,x,waiting_for,'WL')
+        for site in self.live_sites_with_x(request.x):
+            # Check that the transaction knows it needs the lock on site.x
+            # and request lock if not
+            site.request_write_lock(request.transaction,request.x)
       
     def manage_read_write_read_request(self,request,time):
         """Manage a read request from a read-write transaction. Check
@@ -314,7 +331,7 @@ class TransactionManager(Parser):
             response = self.route_read_write_read(request,time)
         else:
             # Waiting on a lock at a live site.
-            response = request.transaction.read_if_holding_all_required_locks(request,self.time)
+            response = request.transaction.read_if_holding_all_required_locks(request,time)
 
         return response
 
@@ -323,9 +340,18 @@ class TransactionManager(Parser):
         To route a read-only read request, we need to find a server satisfying:
             - Server is alive
             - Server has most recently commited, available version of x, subject
-              to contraint that the commit was before T's start_time
+              to contraint that the commit was before T's start_time. Note
+              we can guarentee this if three events can be ordered as follows:
+              [Site goes live] <= [Snapshot commit with x.available] <= [T starts]
+              (note the equality isn't important here, since a commit only occurs
+               when a transaction ends -- and end(T) and beginRO(T') will always
+               occur on separate ticks).
         If this server exists, then we return the read value. Otherwise
-        this transaction is blocked and needs to wait for such a server.
+        there are two cases:
+            - There are no live servers -- so we just wait
+            - There are live servers, but none satify the conditions outlined
+              above. Then we need to wait until we can try reading from all
+              servers to guarentee we correctly identify the most recent commit to x.
         
         Parameters
         ----------
@@ -343,22 +369,37 @@ class TransactionManager(Parser):
         --------
         nts.RequestResponse
         """
-        T = request.transaction
-        x = request.x
-        for site_number,site in self.sites.items():
-            # Ignore sites that don't contain x or are down.
-            if (x in site.memory) and (site.alive):
-                commit_time, commit_value = site.read_from_disk(T,x)
-                if commit_value is not None:
-                    # Then we found a site with the most recent value of x,
-                    # which can respond to read request
-                    return RequestResponse(transaction=T,x=x,v=commit_value,
-                                           operation='R',success=True,callback=None)
+        for site in self.live_sites_with_x(request.x):
+            response = site.try_reading_from_disk(request)
+            if response.success:
+                # Then we found a site with the most recent value of x,
+                # which can respond to read request
+                return response
+            
+            elif response.success is None:
+                # Then the site returned its most recent available, commited
+                # value of x -- but the site can't guarentee this is the
+                # most recent commit to x (due to intervening site failure).
+                # The read-only transaction thus stores the (potentially
+                # incorrect) read value of x at the site, along with the associated
+                # commit time, and the transaction will only complete the transaction
+                # when it has checked all sites.
+                most_recent_val_and_time = response.v
+                response.transaction.read_values_and_times[site] = most_recent_val_and_time
+
+                # Check if this transaction has now obtained the most recent
+                # available commit from all such sites. If so, return
+                # the most recent value
+                if response.transaction.has_read_x_at_all_sites():
+                    v = response.transaction.most_recent_commit_to_x()
+                    new_response = RequestResponse(transaction=response.transaction,
+                                                   x=response.x,v=v,
+                                                   operation='R',success=True,
+                                                   callback=None)
+                    return new_response
         
         # Didn't find such a server -- so need to try to find one at next tick
-        return RequestResponse(transaction=T,x=x,v=None,
-                               operation='R',success=False,
-                               callback=self.manage_read_only_read_request)
+        return request
         
     def route_read_write_read(self,request,time):
         """Route a read-write read request from transaction T for variable x.
@@ -397,10 +438,8 @@ class TransactionManager(Parser):
         # we need to route read to one of these sites
         live_locked_sites = []
         
-        for site_number,site in self.sites.items():
-            # Ignore sites that don't contain x, are down, or have
-            # recovered without a write to x
-            if (site.alive) and (x in site.memory) and (site.memory[x].available):
+        for site in self.live_sites_with_x(x):
+            if site.memory[x].available:
                 if site.RL_available(T,x).response:
                     # Then lock is available so T can get the lock ...
                     RL = site.give_transaction_RL(T,x)
@@ -411,20 +450,18 @@ class TransactionManager(Parser):
                                            callback=None)
                 else:
                     # Then it's locked -- so we could wait for the lock at this site
-                    live_locked_sites.append((site_number,site))
+                    live_locked_sites.append(site)
         
         # If no live site had x unlocked and available, then we need to route to a locked site.
         if len(live_locked_sites)>0:
             # Choose a live locked site
-            site_number,site = random.choice(live_locked_sites)
+            site = random.choice(live_locked_sites)
 
             # Put the transaction in the queue to get a RL on x
             waiting_for = site.RL_available(T,x).transactions
             site.add_transaction_to_lock_queue(T,x,waiting_for,'RL')
                     
-        return RequestResponse(transaction=T,x=x,v=None,
-                               operation='R',success=False,
-                               callback=self.manage_read_write_read_request)
+        return request
             
     def abort_transaction(self,T,msg):
         """Abort transaction T at all sites. Aborting involves
@@ -506,3 +543,12 @@ class TransactionManager(Parser):
 
         print(f"{T.name} commits")
     
+if __name__ == "__main__":
+
+    parser = argparse.ArgumentParser(description='RepCRec simulation.')
+    parser.add_argument('infile', nargs='?', type=argparse.FileType('r'),
+                        default=sys.stdin)
+
+    args = parser.parse_args()
+    TM = TransactionManager(args.infile)
+    TM.main()

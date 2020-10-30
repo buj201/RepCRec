@@ -19,12 +19,56 @@ class Transaction(object):
 
 class ReadOnlyTransaction(Transaction):
     """Read only transaction.
+
+    Attributes
+    ----------
+    read_only : True
+    site_uptimes : dict of SiteManagers:int
+        Dict mapping sitemanagers to their uptimes at the
+        time this transaction began. This is needed to check
+        that the RO transaction can identify the most recent
+        commit to a variable x.
+    site_uptimes : dict of SiteManagers : (int, Any)
+        Dict mapping sitemanagers to (commit time, value). This
+        dict stores potentially incorrect reads of x, to handle
+        the edge case where every site with a replicated variable
+        has failed between it's last commit with an available
+        copy of x, and the start of this transaction
     """
-    def __init__(self,name,start_time):
+    def __init__(self,name,start_time,site_uptimes):
         super().__init__(name,start_time)
         self.read_only = True
+        self.site_uptimes = site_uptimes
+        self.read_values_and_times = {k:None for k in site_uptimes}
+
     def drop_locks_at_dead_sites(self,dead_sites):
         pass
+
+    def has_read_x_at_all_sites(self):
+        """Check that this transaction has read x at every site.
+
+        Returns
+        -------
+        Bool
+            True if this transaction has read from all sites
+        """
+        for site,time_and_v in self.read_values_and_times.items():
+            if time_and_v is None:
+                return False
+        return True
+
+    def most_recent_commit_to_x(self):
+        """If the transaction has read x at all sites, return
+        the most recent committed value of x.
+        """             
+        if self.has_read_x_at_all_sites():
+            most_recent_val_and_time = sorted(self.read_values_and_times.values(),
+                                              key=lambda x: x[0],
+                                              reverse=True)
+            most_recent_val = most_recent_val_and_time[0][1]
+            return most_recent_val
+        else:
+            raise RuntimeError('Caller needs to check that T has read x at all sites!')
 
 class ReadWriteTransaction(Transaction):
     """Read write transaction, which obtains locks
@@ -209,12 +253,10 @@ class ReadWriteTransaction(Transaction):
             self.locks_needed = defaultdict(set)
 
             return RequestResponse(transaction=self,x=x,v=v,
-                            operation='W',success=True,
-                            callback=None)
+                                   operation='W',success=True,
+                                   callback=None)
         else:
-            return RequestResponse(transaction=self,x=x,v=v,
-                           operation='W',success=False,
-                           callback=request.callback)
+            return request
     
     def read_if_holding_all_required_locks(self,request,time):
         """Write to all available copies, if holding all required locks.
@@ -236,7 +278,6 @@ class ReadWriteTransaction(Transaction):
         --------
         nts.RequestResponse
         """
-        v = request.v
         x = request.x
 
         has_all_needed_locks = self.is_holding_all_required_locks(request)
@@ -248,12 +289,10 @@ class ReadWriteTransaction(Transaction):
             self.locks_needed = defaultdict(set)
             
             return RequestResponse(transaction=self,x=x,v=v,
-                            operation='R',success=True,
-                            callback=None)
+                                   operation='R',success=True,
+                                   callback=None)
         else:
-            return RequestResponse(transaction=self,x=x,v=None,
-                            operation='R',success=False,
-                            callback=request.callback)
+            return request
 
     def drop_locks_at_dead_sites(self,dead_sites):
         """Delete locks held at dead sites, and also remove these

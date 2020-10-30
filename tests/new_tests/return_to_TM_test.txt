@@ -1,4 +1,3 @@
-# Condition: T1 is in queue for lock on x1 at site 2. When site 2 fails, old implementation lives T1 hanging (waiting on a lock from site 2, but site 2 will never provide this lock since the lock queue is wiped). In implementation, when a site fails, the TM updates each blocked transactions "locks requested". If this yields an empty "locks requested", the transaction is sent back to the TM to try again.
 begin(T1)
 begin(T2)
 W(T2,x1,222)

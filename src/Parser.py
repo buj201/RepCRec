@@ -1,6 +1,7 @@
 import re
 from src.request_response import RequestResponse
 from src.Transaction import ReadWriteTransaction,ReadOnlyTransaction
+import math
 
 class Parser(object):
     """Parser for the incoming operation requests.
@@ -69,12 +70,18 @@ class Parser(object):
         Add read only transaction to self.transactions
         """
         T = m.group(1)
-        self.transactions[T] = ReadOnlyTransaction(T,self.time)
         
+        # Get the uptimes for all sites
+
+        site_uptimes = {site:site.uptime if site.alive else math.inf 
+                        for site in self.sites.values()}
+        
+        self.transactions[T] = ReadOnlyTransaction(T,self.time,site_uptimes)
+
         # Create and return dummy request
         request = RequestResponse(transaction=self.transactions[T],
-                          x=None,v=None,operation='beginRO',
-                          success=True,callback=self.success_callback)
+                                  x=None,v=None,operation='beginRO',
+                                  success=True,callback=self.success_callback)
 
         return request
         
@@ -98,10 +105,10 @@ class Parser(object):
 
         if T.read_only:
             request = RequestResponse(transaction=T,x=x,v=None,operation='R',
-                            success=False,callback=self.manage_read_only_read_request)
+                                      success=False,callback=self.manage_read_only_read_request)
         else:
             request = RequestResponse(transaction=T,x=x,v=None,operation='R',
-                            success=False,callback=self.manage_read_write_read_request)
+                                      success=False,callback=self.manage_read_write_read_request)
         return request
         
     def parse_W(self,m):

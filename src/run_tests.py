@@ -3,6 +3,9 @@ import sys
 import glob
 import pandas as pd
 
+import sys
+import argparse
+
 from .TransactionManager import TransactionManager
 
 tests = glob.glob('tests/provided_tests/t*')
@@ -12,7 +15,12 @@ for t in tests:
         TM.instructions.close()
     except:
         pass
-    TM = TransactionManager(test=t)
+
+    parser = argparse.ArgumentParser(description='RepCRec simulation.')
+    parser.add_argument('infile', nargs='?', type=argparse.FileType('r'),
+                        default=sys.stdin)
+    args = parser.parse_args([t])                   
+    TM = TransactionManager(instructions=args.infile)
     
     sys.stdout = sys.__stdout__
     print(f'Running test {t}:')

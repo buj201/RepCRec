@@ -2,6 +2,7 @@ from .Variable import Variable
 from .LockTable import LockTable
 from collections import deque, namedtuple
 from copy import deepcopy
+from .request_response import RequestResponse
 
 Snapshot = namedtuple('Snapshot', ['time', 'snapshot'])
 
@@ -54,43 +55,96 @@ class SiteManager(LockTable):
                               snapshot={x:deepcopy(v) for x,v in self.memory.items()})]
         
         
-    def read_from_disk(self,T,x):
-        """ Transaction T reads x from disk. T can only read x
+    def try_reading_from_disk(self,request):
+        """ Transaction T requests to reads x from disk. T can only read x
         at this site if:
-            - T reads from a commit that occurred before T started
+            - There was a commit at this site that occurred before T started
             - x is available in this commit (i.e. this site hadn't
               recovered from failure prior to this commit, with x
               not in the write set of the commmitting transaction)
-            - The site has been live since this commit.
+            - The site has been live since this commit. We check this by
+              reference the RO transaction's site_uptimes dict.
         
         Parameters
         ----------
-        T : Transaction
-            Transaction requesting read on x
-        x : Variable name
-            Name of variable to read
+        request : RequestResponse
+            RequestResponse with a transaction T and variable x.
             
         Returns
         -------
-        int, any
-            Commit time of snapshot read, value of x in that commit
+        RequestResponse
+            Response to read request, with success indicating the
+            transaction was able to read from a committed copy at
+            this site.
         """
         
         # Get most recent snapshot on disk by traversing in reversed
         # order, breaking out if we find the most recently committed
         # copy of x at this site
-        for snapshot in reversed(self.disk):
-            if ((T.start_time > snapshot.time) and 
-                (snapshot.snapshot[x].available) and 
-                (snapshot.time >= self.uptime)):
-                return snapshot.time, snapshot.snapshot[x].read()
+        T = request.transaction
+        v = request.v
+        x = request.x
+
+        # Case 1 -- if x is not replicated, then we just grab the last
+        # snapshot before the RO transaction began
+        if not self.memory[x].replicated:
+            for snapshot in reversed(self.disk):
+                if (T.start_time >= snapshot.time):
+                    v = snapshot.snapshot[x].read()
+                    return RequestResponse(transaction=T,x=x,v=v,
+                                           operation='R',success=True,callback=None)
+
+        else:
+            # Case 2a -- then x is replicated. Then we need to check that the
+            # snapshot was committed before T started, that x is available in
+            # the commit, and that the site hasn't died since the commit.
+            # If the site has died, then it's possible the most recent
+            # available commit at this site isn't the most recent commit of
+            # the variable.
+            for snapshot in reversed(self.disk):
+                if ((T.start_time >= snapshot.time) and 
+                    (snapshot.snapshot[x].available) and 
+                    (snapshot.time >= T.site_uptimes[self])):
+                    # Then this site has a snapshot with the most recent commited
+                    # value of x. Return this value.
+                    v = snapshot.snapshot[x].read()
+                    return RequestResponse(transaction=T,x=x,v=v,
+                                           operation='R',success=True,callback=None)
+            
+            # Case 2b -- x is replicated, but there is no snapshot
+            # from prior to the start of transaction T where x is
+            # available, and where the site has not died since the snapshot
+            # was made. Since the initial state at the site will have
+            # an available copy of x, and be snapshotted when the
+            # site is instantiated (at time 0), this condition must fail because
+            # of site failure. To handle the (extreme) edge case
+            # where all sites have failed between the last available
+            # snapshot of x, and the start of transaction T, we return
+            # a response with success=None (e.g. hacking ternary logic).
+            for snapshot in reversed(self.disk):
+                if ((T.start_time >= snapshot.time) and 
+                    (snapshot.snapshot[x].available)):
+                    # Then this site has a snapshot with an available commited
+                    # value of x from before T began -- but, it might
+                    # not be the most recent commit (as the site died after the
+                    # commit). Return this value along with the commit time,
+                    # but indicate indeterminant success with success=None
+                    v = snapshot.snapshot[x].read()
+                    return RequestResponse(transaction=T,x=x,v=(snapshot.time,v),
+                                           operation='R',success=None,
+                                           callback=request.callback)
         
-        # Otherwise the most recent value of x is not available at this
-        # site
-        return None, None
+        # Raise a runtime error if these conditions don't hold. Every live
+        # site should always have a snapshot where every x is available -- 
+        # since the initial state of the site has x available
+        raise RuntimeError('No available copy of x in any prior snapshot.')
         
     def read_from_memory(self,x):
-        """ Transaction T reads x from memory
+        """ Transaction T reads x from memory. T can only read x
+        at this site if:
+            - x is available at this site (i.e. this site hadn't
+              recovered from failure prior to this commit, with x
+              not in the write set of the commmitting transaction)
         
         Parameters
         ----------
@@ -101,8 +155,9 @@ class SiteManager(LockTable):
             
         Returns
         -------
-        any
-            Current value of x in memory
+        Any
+            If site does not have most recent committed value of x,
+            then return None
         """
         return self.memory[x].read()
                    

@@ -185,6 +185,35 @@ class LockTable(object):
         self.lock_table[x]['WL'] = T
         T.write_locks[self].add(x)
     
+    def request_write_lock(self,T,x):
+        """Check if the transaction T is waiting on a WL
+        on x at this site. If not, have T request a WL
+        on this site, and give T this lock if it's available, or
+        add it T to the queue if not. In either case, add
+        this site to T's locks_needed set.
+
+        Parameters
+        ----------
+        T : ReadWriteTransaction
+            Transaction requesting WL on x
+        x : Variable name
+            Variable for which WL is requested
+
+        Side effects
+        ------------
+        - Updates both the lock table, and T's locks_needed
+          and potentially the locks it holding.
+        """
+        if x not in T.locks_needed[self]:
+            # If not, then we need to try to give T the lock, or
+            # add it to the queue, and update T's lock_needed dict
+            T.locks_needed[self].add(x)
+            lock_available, waiting_for = self.WL_available(T,x)
+            if lock_available:
+                self.give_transaction_WL(T,x)
+            else:
+                self.add_transaction_to_lock_queue(T,x,waiting_for,'WL')
+
     def give_transaction_RL(self,T,x):
         """ Gives transaction T a RL on x.
             
@@ -300,7 +329,7 @@ class LockTable(object):
             # Remove T from the queue for locks on x
             new_wait_list = deque()
             for waiter in row['waiting']:
-                if waiter[0] != T:
+                if waiter.transaction != T:
                     new_wait_list.append(waiter)
             row['waiting'] = new_wait_list
             
