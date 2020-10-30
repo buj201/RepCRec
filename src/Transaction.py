@@ -1,5 +1,5 @@
 from collections import defaultdict,namedtuple
-from src.request_response import RequestResponse
+from .request_response import RequestResponse
 from copy import deepcopy
 
 class Transaction(object):
@@ -22,26 +22,31 @@ class ReadOnlyTransaction(Transaction):
 
     Attributes
     ----------
-    read_only : True
-    site_uptimes : dict of SiteManagers:int
+    site_uptimes : dict of SiteManagers : int
         Dict mapping sitemanagers to their uptimes at the
         time this transaction began. This is needed to check
         that the RO transaction can identify the most recent
         commit to a variable x.
-    site_uptimes : dict of SiteManagers : (int, Any)
-        Dict mapping sitemanagers to (commit time, value). This
-        dict stores potentially incorrect reads of x, to handle
-        the edge case where every site with a replicated variable
+    read_values_and_times : dict of SiteManagers : (int, Any)
+        Dict mapping sitemanagers to (commit time, value). Needed
+        to  handle the edge case where every site with a replicated variable
         has failed between it's last commit with an available
-        copy of x, and the start of this transaction
+        copy of x, and the start of this transaction. In this
+        context, the value is the value of some read variable x, which
+        may or may not be the most recent committed value of x
+        prior to the start of this transaction.
     """
+
+    READ_ONLY = True
+    """Indicates transaction is read-only
+    """
+
     def __init__(self,name,start_time,site_uptimes):
         super().__init__(name,start_time)
-        self.read_only = True
         self.site_uptimes = site_uptimes
         self.read_values_and_times = {k:None for k in site_uptimes}
 
-    def drop_locks_at_dead_sites(self,dead_sites):
+    def _drop_locks_at_dead_sites(self,dead_sites):
         pass
 
     def has_read_x_at_all_sites(self):
@@ -60,6 +65,11 @@ class ReadOnlyTransaction(Transaction):
     def most_recent_commit_to_x(self):
         """If the transaction has read x at all sites, return
         the most recent committed value of x.
+
+        Returns
+        -------
+        Any
+            Most recent committed value of x (across all sites)
         """             
         if self.has_read_x_at_all_sites():
             most_recent_val_and_time = sorted(self.read_values_and_times.values(),
@@ -76,23 +86,24 @@ class ReadWriteTransaction(Transaction):
 
     Attributes
     ----------
-    read_only : False
-    read_locks : dict of SiteManager:set
+    read_locks : dict of SiteManager : set
         Set of read locks currently held by transaction at each site
-    write_locks : dict of SiteManager:set
+    write_locks : dict of SiteManager : set
         Set of write locks currently held by transaction at each site
-    locks_needed : dict of SiteManager:set
+    locks_needed : dict of SiteManager : set
         Locks needed by the transaction, at each site, in order for
         its next queued request to proceed.
-    first_accessed_time : dict of SiteManager:int
+    first_accessed_time : dict of SiteManager : int
         Time that each site was first accessed (i.e. for read or write)
         by this transaction
-    after_image : dict of dicts, mapping SiteManagers to variable:value pairs
+    after_image : dict of SiteManagers : {variable : value}
         After image for writes to each site by this transaction
     """
+    READ_ONLY = False
+    """Indicates transaction is read-write"""
     def __init__(self,name,start_time):
+
         super().__init__(name,start_time)
-        self.read_only = False
         
         # Locks that this transaction is holding
         self.read_locks = defaultdict(set)
@@ -111,8 +122,8 @@ class ReadWriteTransaction(Transaction):
     def is_waiting_on_locks(self):
         """Check if the transaction is waiting on locks.
         If so, then the request has already been routed
-        to a live site, and we can simply check if we've been
-        given the required locks by calling `try_again`.
+        to a live site. Otherwise, the TM needs to route
+        the request to some live site.
 
         Returns
         -------
@@ -223,7 +234,6 @@ class ReadWriteTransaction(Transaction):
 
     def write_if_holding_all_required_locks(self,request,time):
         """Write to all available copies, if holding all required locks.
-        Assumes caller confirmed the blocked request is a write request.
         
         Parameters
         ----------
@@ -235,11 +245,7 @@ class ReadWriteTransaction(Transaction):
             
         Returns
         -------
-        nts.RequestResponse
-        
-        See Also
-        --------
-        nts.RequestResponse
+        src.request_response.RequestResponse
         """
         v = request.v
         x = request.x
@@ -259,8 +265,7 @@ class ReadWriteTransaction(Transaction):
             return request
     
     def read_if_holding_all_required_locks(self,request,time):
-        """Write to all available copies, if holding all required locks.
-        Assumes caller confirmed the blocked request is a read request.
+        """Read to all available copies, if holding all required locks.
         
         Parameters
         ----------
@@ -272,11 +277,7 @@ class ReadWriteTransaction(Transaction):
             
         Returns
         -------
-        nts.RequestResponse
-        
-        See Also
-        --------
-        nts.RequestResponse
+        src.request_response.RequestResponse
         """
         x = request.x
 
@@ -294,7 +295,7 @@ class ReadWriteTransaction(Transaction):
         else:
             return request
 
-    def drop_locks_at_dead_sites(self,dead_sites):
+    def _drop_locks_at_dead_sites(self,dead_sites):
         """Delete locks held at dead sites, and also remove these
         sites from the locks needed list (e.g. the sites at which
         this transaction is waiting for a lock).

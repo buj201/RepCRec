@@ -1,7 +1,8 @@
 import re
-from src.request_response import RequestResponse
-from src.Transaction import ReadWriteTransaction,ReadOnlyTransaction
+from .request_response import RequestResponse
+from .transaction import ReadWriteTransaction,ReadOnlyTransaction
 import math
+from collections import deque
 
 class Parser(object):
     """Parser for the incoming operation requests.
@@ -24,7 +25,7 @@ class Parser(object):
             r'recover\(([\d]+)\)': self.parse_recover
         }
 
-    def success_callback(self,request,time):
+    def _success_callback(self,request,time):
         """Callback for requests which always succeed.
         """
         # Create and return dummy request
@@ -42,9 +43,9 @@ class Parser(object):
         m : re.match
             Match object corresponding to begin() pattern
 
-        Side effects
+        Notes
         ------------
-        Add read write transaction to self.transactions
+        - Add read write transaction to self.transactions
         """
         T = m.group(1)
         self.transactions[T] = ReadWriteTransaction(T,self.time)
@@ -52,7 +53,7 @@ class Parser(object):
         # Create and return dummy request
         request = RequestResponse(transaction=self.transactions[T],
                           x=None,v=None,operation='begin',
-                          success=True,callback=self.success_callback)
+                          success=True,callback=self._success_callback)
 
         return request
         
@@ -65,9 +66,9 @@ class Parser(object):
         m : re.match
             Match object corresponding to beginRO() pattern
 
-        Side effects
+        Notes
         ------------
-        Add read only transaction to self.transactions
+        - Add read only transaction to self.transactions
         """
         T = m.group(1)
         
@@ -81,7 +82,7 @@ class Parser(object):
         # Create and return dummy request
         request = RequestResponse(transaction=self.transactions[T],
                                   x=None,v=None,operation='beginRO',
-                                  success=True,callback=self.success_callback)
+                                  success=True,callback=self._success_callback)
 
         return request
         
@@ -98,12 +99,13 @@ class Parser(object):
 
         See Also
         --------
-        try_reading
+        :py:meth:`~src.transaction_manager.TransactionManager.manage_read_only_read_request`
+        :py:meth:`~src.transaction_manager.TransactionManager.manage_read_write_read_request`
         """
         T = self.transactions[m.group(1)]
         x = m.group(2)
 
-        if T.read_only:
+        if T.READ_ONLY:
             request = RequestResponse(transaction=T,x=x,v=None,operation='R',
                                       success=False,callback=self.manage_read_only_read_request)
         else:
@@ -121,7 +123,7 @@ class Parser(object):
 
         See Also
         --------
-        try_writing
+        :py:meth:`~src.transaction_manager.TransactionManager.manage_write_request`
         """
         T = self.transactions[m.group(1)]
         x = m.group(2)
@@ -152,7 +154,7 @@ class Parser(object):
         # Create and return dummy request
         request = RequestResponse(transaction=None,
                           x=None,v=None,operation='dump',
-                          success=True,callback=self.success_callback)
+                          success=True,callback=self._success_callback)
 
         return request
         
@@ -170,11 +172,21 @@ class Parser(object):
         T = self.transactions[m.group(1)]
         
         def end_callback(request,time):
-            if T.read_only == True:
+            if T.READ_ONLY == True:
                 # Then committing is trivial
                 print(f"{T.name} commits")
                 # Delete this transaction
                 del self.transactions[T.name]
+
+                # Update the request queue (to handle
+                # cases where we end a RO transaction
+                # while it is still waiting on some read).
+                new_q = deque()
+                while self.has_backlogged_requests():
+                    next_t = self.request_queue.popleft()
+                    if not next_t.transaction == T:
+                        new_q.append(next_t)
+                self.request_queue = new_q
                 
             else:
                 # Then we need to check if T can commit
@@ -183,7 +195,7 @@ class Parser(object):
                 else:
                     self.abort_transaction(T,'failure')
 
-            return self.success_callback(request,self.time)
+            return self._success_callback(request,self.time)
         
         # Create and return dummy request
         request = RequestResponse(transaction=None,
@@ -205,7 +217,7 @@ class Parser(object):
         
         See Also
         --------
-        SiteManager.fail
+        :py:meth:`~src.site_manager.SiteManager.fail`
         """
         
         def fail_callback(request,time):
@@ -214,9 +226,9 @@ class Parser(object):
 
             # Tell transactions to remove the locks they're holding at thise site
             for T in self.transactions.values():
-                T.drop_locks_at_dead_sites([S])
+                T._drop_locks_at_dead_sites([S])
                 
-            return self.success_callback(request,self.time)
+            return self._success_callback(request,self.time)
         
         # Create and return dummy request
         request = RequestResponse(transaction=None,
@@ -235,12 +247,12 @@ class Parser(object):
         
         See Also
         --------
-        SiteManager.recover
+        :py:meth:`~src.site_manager.SiteManager.recover`
         """
         def recover_callback(request,time):
             S = self.sites[int(m.group(1))]
             S.recover(self.time)
-            return self.success_callback(request,self.time)
+            return self._success_callback(request,self.time)
         
         # Create and return dummy request
         request = RequestResponse(transaction=None,

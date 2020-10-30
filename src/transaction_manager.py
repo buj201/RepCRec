@@ -6,10 +6,10 @@ import random
 import argparse
 import sys
 
-from src.SiteManager import SiteManager
-from src.Parser import Parser
-from src.Transaction import ReadWriteTransaction,ReadOnlyTransaction
-from src.request_response import RequestResponse
+from .site_manager import SiteManager
+from .parser import Parser
+from .transaction import ReadWriteTransaction,ReadOnlyTransaction
+from .request_response import RequestResponse
 
 class TransactionManager(Parser):
     """
@@ -22,17 +22,19 @@ class TransactionManager(Parser):
     ----------
     time : int
         Current time (number of ticks)
-    sites : dict
+    sites : dict of int : SiteManager
         Maps site numbers (1-10) to SiteManagers
-    transactions : dict 
+    transactions : dict of str : Transaction
         Maps transaction names (ex: T1) to Transactions
-    instructions : fileinput input
-        Input file, or stdin, from which instructions are read
+    instructions : TextIOWrapper
+        Wrapper on input file, or stdin, from which instructions are read
     request_queue : deque
         A queue storing RequestResponses, with callbacks to execute for operations
         that were blocked by lock conflicts or failures
     """
     N_SITES = 10
+    """Total number of sites.
+    """
     
     def __init__(self,instructions='-'):
         """Initializes the TransactionManager for the input
@@ -91,9 +93,7 @@ class TransactionManager(Parser):
         -------
         bool
             True if input instructions exhausted, False if not
-        """
-        end_of_instructions = False
-        
+        """        
         # Step 0: Increment time
         self.time += 1
         
@@ -104,6 +104,7 @@ class TransactionManager(Parser):
         new_request = self.get_next_new_request(debug)
         if new_request is not None:
             self.request_queue.append(new_request)
+            end_of_instructions = False
         else:
             end_of_instructions = True
 
@@ -117,6 +118,10 @@ class TransactionManager(Parser):
         Note the request queue includes blocked operations,
         where the requested operation is blocked due to either lock
         conflicts or due to failure, as well as the next new instruction.
+
+        Notes
+        ------------
+        - See side effects for functions called during commit/abort/read/write/etc.
         """
         new_queue = deque()
     
@@ -157,7 +162,7 @@ class TransactionManager(Parser):
 
         Returns
         -------
-        RequestResponse
+        src.request_response.RequestResponse
             Next request. If None, then simulation is over.
         """
         try:
@@ -172,6 +177,13 @@ class TransactionManager(Parser):
     def unlock_deadlocks(self):
         """Detect deadlocks, and "unlock" deadlocks by aborting youngest
         transaction in waits-for graph.
+
+        Notes
+        ------------
+        - If a deadlock is detected, aborts the youngest transaction
+          in the detected cycle.
+        - When a cycle is aborted, each site attempts to reassign locks
+          to queued transactions.
         """
         deadlocked = True
         while deadlocked:
@@ -207,7 +219,7 @@ class TransactionManager(Parser):
         
         Parameters
         ----------
-        composed_waits_for : digraph
+        composed_waits_for : networkx.DiGraph
             Composition of all of the waits-for graphs
             
         Returns
@@ -231,7 +243,7 @@ class TransactionManager(Parser):
             
         Returns
         -------
-        digraph
+        networkx.DiGraph
             Composed waits for graph from each site
         """
 
@@ -261,12 +273,11 @@ class TransactionManager(Parser):
         RequestResponse
             A new RequestResponse object.
 
-        Side effects
+        Notes
         ------------
-        - If the operation is a write, check that the operation is waiting
-          for the write lock at all live sites with the variable. If not,
-          request locks as needed so the write operation will write to all
-          available copies.
+        - Check that the operation is waiting for the write lock at all live sites
+          with the variable. If not, request locks as needed so the write operation
+          will write to all available copies.
         """
         # Step 1: Update the lock requests
         self.refresh_transactions_write_lock_requests(request)
@@ -291,15 +302,11 @@ class TransactionManager(Parser):
         ----------
         request : RequestResponse, for a "W" operation
 
-        Returns
-        -------
-        None
-
-        Side effects
+        Notes
         ------------
-        Either adds the transaction to the lock queue, or gives the transaction
-        the write lock, at each site which is (i) alive, and (ii) the
-        transaction is not holding or waiting for a lock.
+        - Either adds the transaction to the lock queue, or gives the transaction
+          the write lock, at each site which is (i) alive, and (ii) the
+          transaction is not holding or waiting for a lock.
         """
         for site in self.live_sites_with_x(request.x):
             # Check that the transaction knows it needs the lock on site.x
@@ -322,8 +329,12 @@ class TransactionManager(Parser):
 
         Returns
         -------
-        RequestResponse
-            A new RequestResponse object.
+        src.request_response.RequestResponse
+            Response to request.
+
+        See Also
+        --------
+        :py:meth:`~src.transaction.ReadWriteTransaction.read_if_holding_all_required_locks`
         """
         # Read-write transaction
         if not request.transaction.is_waiting_on_locks():
@@ -341,17 +352,17 @@ class TransactionManager(Parser):
             - Server is alive
             - Server has most recently commited, available version of x, subject
               to contraint that the commit was before T's start_time. Note
-              we can guarentee this if three events can be ordered as follows:
-              [Site goes live] <= [Snapshot commit with x.available] <= [T starts]
-              (note the equality isn't important here, since a commit only occurs
-               when a transaction ends -- and end(T) and beginRO(T') will always
-               occur on separate ticks).
+              we can guarantee this if three events can be ordered as
+              `Site goes live` <= `[`Snapshot commit with x.available`]` <= `T starts`.
+              Note the equality isn't important here, since a commit only occurs
+              when a transaction ends, and end(T) and beginRO(T') will always
+              occur on separate ticks.
         If this server exists, then we return the read value. Otherwise
         there are two cases:
             - There are no live servers -- so we just wait
             - There are live servers, but none satify the conditions outlined
               above. Then we need to wait until we can try reading from all
-              servers to guarentee we correctly identify the most recent commit to x.
+              servers to guarantee we correctly identify the most recent commit to x.
         
         Parameters
         ----------
@@ -363,11 +374,12 @@ class TransactionManager(Parser):
             
         Returns
         -------
-        nts.RequestResponse
-        
+        src.request_response.RequestResponse
+            Response to request.
+
         See Also
         --------
-        nts.RequestResponse
+        :py:meth:`~src.site_manager.SiteManager.try_reading_from_disk`
         """
         for site in self.live_sites_with_x(request.x):
             response = site.try_reading_from_disk(request)
@@ -378,7 +390,7 @@ class TransactionManager(Parser):
             
             elif response.success is None:
                 # Then the site returned its most recent available, commited
-                # value of x -- but the site can't guarentee this is the
+                # value of x -- but the site can't guarantee this is the
                 # most recent commit to x (due to intervening site failure).
                 # The read-only transaction thus stores the (potentially
                 # incorrect) read value of x at the site, along with the associated
@@ -412,7 +424,7 @@ class TransactionManager(Parser):
         If no servers satisfy these conditions, then we find a server:
             - Server is alive
             - Variable is available (e.g. not unavailable due to failure)
-            - RequestResponse lock on x and wait
+            - Request lock on x and wait
             
         Parameters
         ----------
@@ -424,11 +436,8 @@ class TransactionManager(Parser):
             
         Returns
         -------
-        nts.RequestResponse
-        
-        See Also
-        --------
-        nts.RequestResponse
+        src.request_response.RequestResponse
+            Response to request.
         """
 
         T = request.transaction
@@ -479,14 +488,14 @@ class TransactionManager(Parser):
         msg : str
             Reason for abort (currently either 'failure' or 'deadlock')
             
-        Side effects
+        Notes
         ------------
-        Remove T from all objects managed by either the
-        SiteManagers or the TransactionManager
+        - Remove T from all objects managed by either the SiteManagers
+          or the TransactionManager
 
         See Also
         --------
-        src.SiteManager.end
+        :py:meth:`~src.site_manager.SiteManager.end`
         """
         # End this transaction at all sites
         for site_number,site in self.sites.items():
@@ -515,14 +524,14 @@ class TransactionManager(Parser):
         T : Transaction
             Transaction to commit
             
-        Side effects
+        Notes
         ------------
-        Remove T from all objects managed by either the
-        SiteManagers or the TransactionManager
+        - Remove T from all objects managed by either the
+          SiteManagers or the TransactionManager
 
         See Also
         --------
-        src.SiteManager.end
+        :py:meth:`~src.site_manager.SiteManager.end`
         """
         for site in T.after_image:
             # Write to memory

@@ -6,7 +6,7 @@ import pandas as pd
 import sys
 import argparse
 
-from .TransactionManager import TransactionManager
+from .transaction_manager import TransactionManager
 
 tests = glob.glob('tests/provided_tests/t*')
 

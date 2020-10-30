@@ -8,7 +8,7 @@ import matplotlib
 matplotlib.use('agg')
 import matplotlib.pyplot as plt
 
-from .TransactionManager import TransactionManager
+from .transaction import TransactionManager
 
 import dash_core_components as dcc
 import dash_table
@@ -67,16 +67,16 @@ def fig_to_uri(in_fig, close_all=True, **save_args):
 def rep_transaction(T):
 
     start_time = TM.transactions[T].start_time
-    read_only = TM.transactions[T].read_only
+    READ_ONLY = TM.transactions[T].READ_ONLY
     
-    if read_only:
-        return dcc.Markdown(f"#### Transaction {T}:\n* Start Time = {start_time}\n* Read-only = {read_only}")
+    if READ_ONLY:
+        return dcc.Markdown(f"#### Transaction {T}:\n* Start Time = {start_time}\n* Read-only = {READ_ONLY}")
     
     else:
         read_locks = {k.site_number: v for k,v in TM.transactions[T].read_locks.items() if len(v)>0}
         write_locks = {k.site_number: v for k,v in TM.transactions[T].write_locks.items() if len(v)>0}
         locks_needed = {k.site_number: v for k,v in TM.transactions[T].locks_needed.items() if len(v)>0}
-        m = dcc.Markdown(f"#### Transaction {T}:\n* Start Time = {start_time}\n* Read-only = {read_only}" +\
+        m = dcc.Markdown(f"#### Transaction {T}:\n* Start Time = {start_time}\n* Read-only = {READ_ONLY}" +\
                          f"\n* Read locks = {read_locks}\n* Write locks = {write_locks}"+\
                          f"\n* Locks needed = {locks_needed}",
                          style={'padding-bottom':25})
