@@ -14,6 +14,8 @@ Design
    
    README.md
 
+.. image:: _static/RepCRecSequence.png
+
 Detailed Documentation
 --------------------
 
