@@ -143,18 +143,21 @@ class Parser(object):
         m : re.match
             Match object corresponding to dump() pattern
         """
-        for site in range(1,11):
-            kv = [(k,x.value) for k,x in self.sites[site].memory.items()]
-            kv = sorted(kv,key=lambda x: int(x[0][1:]))
-            print_str = f'site {site} -'
-            for x in kv:
-                print_str = print_str + f' {x[0]}: {x[1]},'
-            print(print_str[:-1])
+
+        def dump_callback(request,time):
+            for site in range(1,11):
+                kv = [(k,x.value) for k,x in self.sites[site].memory.items()]
+                kv = sorted(kv,key=lambda x: int(x[0][1:]))
+                print_str = f'site {site} -'
+                for x in kv:
+                    print_str = print_str + f' {x[0]}: {x[1]},'
+                print(print_str[:-1])
+            return self._success_callback(request,self.time)
         
         # Create and return dummy request
         request = RequestResponse(transaction=None,
-                          x=None,v=None,operation='dump',
-                          success=True,callback=self._success_callback)
+                                  x=None,v=None,operation='dump',
+                                  success=True,callback=dump_callback)
 
         return request
         
