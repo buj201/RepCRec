@@ -1,4 +1,6 @@
 notebooks/
 __pycache__/
+.reprozip-trace/
+*.rpz
 .ipynb_checkpoints/
 build/
