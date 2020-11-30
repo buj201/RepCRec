@@ -6,7 +6,7 @@
 Table of Contents
 =======================
 
-Design
+Instructions + Design
 --------------------
 
 .. toctree::
