@@ -64,25 +64,32 @@ class LockTable(object):
         waiting_for_write_lock = set(other.transaction for other in self.lock_table[x]['waiting']
                                      if other.lock_type == 'WL').difference([T])
         
-        # Case 1 -- another transaction is currently holding a write lock
-        if (holding_write_lock is not None) and (holding_write_lock != T):
-            return _LockTableResponse(
-                response=False,
-                transactions=set([holding_write_lock]).union(waiting_for_write_lock)
-            )
-        
-        # Case 2 -- no other transaction is currently holding a write lock,
-        # but some other transaction is waiting for a write lock
-        elif (holding_write_lock is None) and (len(waiting_for_write_lock) > 0):
-            return _LockTableResponse(
-                response=False,
-                transactions=waiting_for_write_lock
-            )
-        
-        # Case 3: all other cases, T can have lock
-        else:
+        # Case 1 -- already holding a sufficient lock
+        if (holding_write_lock == T) or (T in self.lock_table[x]['RL']):
             return _LockTableResponse(response=True,
-                                     transactions=set())
+                                      transactions=set())
+
+        # Case 2 -- not already holding a sufficient lock
+        else:
+            # Case 2a -- another transaction is currently holding a WL
+            if (holding_write_lock is not None):
+                return _LockTableResponse(
+                    response=False,
+                    transactions=set([holding_write_lock]).union(waiting_for_write_lock)
+                )
+            
+            # Case 2b -- no other transaction is currently holding a write lock,
+            # but some other transaction is waiting for a write lock
+            elif (holding_write_lock is None) and (len(waiting_for_write_lock) > 0):
+                return _LockTableResponse(
+                    response=False,
+                    transactions=waiting_for_write_lock
+                )
+        
+            # Case 2c -- all other cases, T can have lock
+            else:
+                return _LockTableResponse(response=True,
+                                          transactions=set())
         
     def WL_available(self,T,x):
         """ Check if transaction T can get write lock on x. A transaction can get a write
@@ -281,10 +288,7 @@ class LockTable(object):
                 # Case 1: No transaction holds a WL
                 if (self.lock_table[x]['WL'] is None):
                     self.give_transaction_RL(requesting_T,x)
-                # Case 2: requesting_T already has WL
-                elif (self.lock_table[x]['WL'] == requesting_T):
-                    self.give_transaction_RL(requesting_T,x)
-                # Case 3: some other transacion has WL
+                # Case 2: some other transaction has WL
                 else:
                     gave_new_lock = False
                     # Put this transaction back at front of queue
@@ -292,15 +296,12 @@ class LockTable(object):
                     
             # Requesting WL
             else:
-                # Case 1: Already holds a WL:
-                if (self.lock_table[x]['WL'] == requesting_T):
-                    self.give_transaction_WL(requesting_T,x)
-                # Case 2: No other transaction holds a WL and
+                # Case 1: No other transaction holds a WL and
                 # no other transactions have read locks
-                elif ((self.lock_table[x]['WL'] is None) and
+                if ((self.lock_table[x]['WL'] is None) and
                     (len(self.lock_table[x]['RL'].difference([requesting_T]))==0)):
                     self.give_transaction_WL(requesting_T,x)
-                # Case 3: All other cases can't give lock
+                # Case 2: All other cases can't give lock
                 else:
                     gave_new_lock = False
                     # Put this transaction back at front of queue

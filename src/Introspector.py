@@ -3,12 +3,13 @@ import sys
 import glob
 import pandas as pd
 import networkx as nx
+import fileinput
 
 import matplotlib
 matplotlib.use('agg')
 import matplotlib.pyplot as plt
 
-from .transaction import TransactionManager
+from .transaction_manager import TransactionManager
 
 import dash_core_components as dcc
 import dash_table
@@ -242,7 +243,7 @@ def update_stdout(T):
 
 if __name__ == '__main__':
 
-    TM = TransactionManager(test=t)
+    TM = TransactionManager(fileinput.input(t))
 
     buff = StringIO()
     # Replace default stdout (terminal) with our stream

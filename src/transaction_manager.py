@@ -5,6 +5,7 @@ import networkx as nx
 import random
 import argparse
 import sys
+import fileinput
 
 from .site_manager import SiteManager
 from .parser import Parser
@@ -31,6 +32,9 @@ class TransactionManager(Parser):
     request_queue : deque
         A queue storing RequestResponses, with callbacks to execute for operations
         that were blocked by lock conflicts or failures
+    failed_request_queue : deque
+        A second queue storing RequestResponses. Stores responses for
+        unsucessful transactions.
     """
     N_SITES = 10
     """Total number of sites.
@@ -52,6 +56,7 @@ class TransactionManager(Parser):
         self.transactions = {}
         self.instructions = instructions
         self.request_queue = deque()
+        self.failed_request_queue = deque()
     
     def live_sites_with_x(self,x):
         """Get list of live sites with x.
@@ -122,9 +127,7 @@ class TransactionManager(Parser):
         Notes
         ------------
         - See side effects for functions called during commit/abort/read/write/etc.
-        """
-        new_queue = deque()
-    
+        """    
         while self.has_backlogged_requests():
 
             next_request = self.request_queue.popleft()
@@ -133,13 +136,14 @@ class TransactionManager(Parser):
             response = next_request.callback(next_request,self.time)
             if not response.success:
                 # Push response onto new queue
-                new_queue.append(response)
+                self.failed_request_queue.append(response)
             else:
                 # If it is successful, and was a read, then we need to print
                 if next_request.operation == 'R':
                     print(f"{next_request.transaction.name}: {response.x}={response.v}")
                     
-        self.request_queue = new_queue
+        self.request_queue = self.failed_request_queue
+        self.failed_request_queue = deque()
        
     def has_backlogged_requests(self):
         """Check if the TransactionManager still needs to try working
@@ -503,14 +507,23 @@ class TransactionManager(Parser):
 
         # Delete this transaction
         del self.transactions[T.name]
-        
-        # Update the request queue
+
+        # Update the request queue.
         new_q = deque()
         while self.has_backlogged_requests():
             next_t = self.request_queue.popleft()
             if not next_t.transaction == T:
                 new_q.append(next_t)
         self.request_queue = new_q
+
+        # Update the failed request queue.
+        new_q = deque()
+        while len(self.failed_request_queue) > 0:
+            next_t = self.failed_request_queue.popleft()
+            if not next_t.transaction == T:
+                new_q.append(next_t)
+        self.failed_request_queue = new_q
+
         print(f'Aborting transaction {T.name} due to {msg}')
 
     def commit_transaction(self,T):

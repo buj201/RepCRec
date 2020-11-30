@@ -181,15 +181,19 @@ class Parser(object):
                 # Delete this transaction
                 del self.transactions[T.name]
 
-                # Update the request queue (to handle
+                # Update the failed request queue (to handle
                 # cases where we end a RO transaction
                 # while it is still waiting on some read).
+                # Note we don't need to update the request
+                # queue, since an end request will always
+                # be the last request in the request_queue
+                # (since it never fails, and thus never queues)
                 new_q = deque()
-                while self.has_backlogged_requests():
-                    next_t = self.request_queue.popleft()
+                while len(self.failed_request_queue) > 0:
+                    next_t = self.failed_request_queue.popleft()
                     if not next_t.transaction == T:
                         new_q.append(next_t)
-                self.request_queue = new_q
+                self.failed_request_queue = new_q
                 
             else:
                 # Then we need to check if T can commit
