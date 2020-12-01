@@ -102,7 +102,7 @@ class LockTable(object):
               or write lock requests)
             - No transactions are holding either a read or write lock on x and no
               transactions are waiting on a lock.
-        In any other case, (i) some transaction has lock on x, and/or (ii) other
+        In any other case, (i) some transaction has a lock on x, and/or (ii) other
         transactions are waiting for a lock -- so this lock request waits for
         all other queued transactions.
         
@@ -172,10 +172,6 @@ class LockTable(object):
     def give_transaction_WL(self,T,x):
         """ Gives transaction T a WL on x.
         
-        Parameters 
-            T: transaction requesting lock
-            x: variable for which lock is requested
-            
         Parameters 
         ----------
         T : ReadWriteTransaction

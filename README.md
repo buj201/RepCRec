@@ -1,43 +1,5 @@
 # RepCRec
 
-## Running RepCRec from `RepCRec.rpz`
-
-My implementation of RepCRec has been reproducibly packaged using
-`reprozip`. Given `RepCRec.rpz`, one can follow the instructions
-below to (1) reproducibly run the set of tests I've provided illustrating
-my system's execution, and (2) execute instructions for a single
-`RepCRec` run from a file.
-
-First, I give instructions for running on a linux machine. Then
-I give instructions for running on a Mac. Note that while these instructions give
-one way to unpack and run  `RepCRec.rpz`, there are other unpackers,
-and other ways to interact with the package. That said, this approach
-is simple and uses `reprounzip` effectively.
-
-### Running on Linux
-
-1. **Setup**: Unpack the package with `reprounzip directory setup RepCRec.rpz RepCRec`
-2. **Run the provided tests**: Run the provided tests using `reprounzip directory run RepCRec 0`
-3. **Execute custom instructions**: To execute custom instructions in a file `new_instructions.txt`,
-there are two steps:
-    1. **Upload the new instructions**: Upload the new instruction file `new_instructions.txt` using
-       the command `reprounzip directory upload RepCRec new_instructions.txt:arg1`
-    2. **Run RepCRec using these instructions**: Execute using the command `reprounzip directory run RepCRec 1`
-4. **Teardown**: To tear down, simply run `reprounzip directory destroy RepCRec`.
-
-### Running on Mac using Docker
-
-These instructions assume you have already installed `docker`. 
-
-1. **Setup**: Unpack the package with `reprounzip docker setup RepCRec.rpz RepCRec`
-2. **Run the provided tests**: Run the provided tests using `reprounzip docker run RepCRec 0`
-3. **Execute custom instructions**: To execute custom instructions in a file `new_instructions.txt`,
-there are two steps:
-    1. **Upload the new instructions**: Upload the new instruction file `new_instructions.txt` using
-       the command `reprounzip docker upload RepCRec new_instructions.txt:arg1`
-    2. **Run RepCRec using these instructions**: Execute using the command `reprounzip docker run RepCRec 1`
-4. **Teardown**: To tear down, simply run `reprounzip docker destroy RepCRec`.
-
 ## Design: Components
 
 My implementation of RepCRec has three basic components:
@@ -131,11 +93,11 @@ proceed to describe key interactions at a high level of abstraction.
 
 1. For `W` requests, the `TransactionManager` checks if the `Transaction`
 needs to request additional locks (if there are newly available copies due
-to site recover), and brokers those requests if needed.
+to site recovery), and brokers those requests if needed.
 2. For both `W` and `R` requests, the `Transaction` checks if it is holding all
 required locks.
     - If so, it executes and returns `RequestResponse` with `success=True`.
-    - Otherwise, it either (i) has the `TransactionManager` broker new lock
+    - Otherwise, it either has the `TransactionManager` broker new lock
     requests (if the `Transaction` is not waiting on a queued lock request), or
     simply waits its turn in any relevant lock queues.
 
@@ -148,6 +110,9 @@ of this commit and the time the `ReadOnlyTransaction` began.
     - If such a site exists, the `Transaction` reads `x`.
     - Otherwise, the `Transaction` has to attempt to read at all sites in order
       to guarantee it is reading the most recent committed copy of `x`.
+Note that non-replicated variables can be read without this added complexity.
+For non-replicated variables, it is sufficient to read the most recent commit
+to the variable made before the `ReadOnlyTransaction` began.
 
 ### begin, beginRO, dump, fail, recover requests
 
@@ -159,8 +124,8 @@ message to the `Transactions` instructing them to drop locks on failure).
 
 ### end requests
 
-The end requests either lead `ReadWriteTransactions` to commit or to abort.
-If they commit, the `SiteManagers` write the `ReadWriteTransactions` after-image,
+The end requests either causes a `ReadWriteTransaction` to commit or to abort.
+If it commits, the `SiteManagers` write the `ReadWriteTransaction`'s after-image,
 and snapshot the commit by writing to disk. Regardless of whether or not the
 `Transaction` commits or aborts, the `SiteManagers` drop the `Transaction` from
 their `LockTable` and waits-for subgraph.

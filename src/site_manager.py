@@ -157,6 +157,11 @@ class SiteManager(LockTable):
         ensuring that x is available, and the requesting transaction
         is holding the required lock.
 
+        Parameters
+        ----------
+        x : Variable name
+            Name of variable to read.
+
         Returns
         -------
         Any

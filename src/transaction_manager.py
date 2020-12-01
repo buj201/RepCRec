@@ -34,7 +34,7 @@ class TransactionManager(Parser):
         that were blocked by lock conflicts or failures
     failed_request_queue : deque
         A second queue storing RequestResponses. Stores responses for
-        unsucessful transactions.
+        requests which are unsuccessfully called during a tick. 
     """
     N_SITES = 10
     """Total number of sites.
